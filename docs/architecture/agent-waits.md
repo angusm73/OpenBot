@@ -11,7 +11,7 @@ separate "watch" object.
 | --- | --- | --- | --- | --- |
 | `routine` | The agent, with `openbot.await_event` | A routine run of the agent, or a local script event that names the wait | The agent's `close_wait`, or the user's cancel | Shipped |
 | `mcp-sign-in` | The host, for a Sign in card from `save_mcp_server` or `test_mcp_server` | The end of a sign-in to the server's address: success, failure or cancel | A sign-in that connects | This change |
-| `webhook` | The agent, with `await_event` and a webhook routine, event type and filters | A webhook event of that routine that matches | `close_wait` or cancel | Stack layer 2 |
+| `webhook` | The agent, with `await_event` and `webhook: { routineId, eventType?, filters? }` | A webhook event of that routine that matches | `close_wait` or cancel | Shipped (stack layer 2) |
 | `github-pull-request` | The agent, with `await_event` and a pull request | Checks failed or passed, a new comment by someone else, a conflict | Merged or closed; 8 failed reads in a row | Stack layer 3 |
 | T3 Code thread | — | — | — | Design only; see below |
 
@@ -121,14 +121,18 @@ adds the woken waits to its input.
 
 ## Sources from outside OpenBot
 
-### Webhook (stack layer 2)
+### Webhook
 
 A webhook routine accepts only OpenBot's own signed body, `{ type, occurredAt?, data? }` with the
 `X-OpenBot-*` headers ([webhooks](../webhooks.md)). GitHub, Linear and Vercel cannot send to it
 directly: a small relay, such as a GitHub Action or a T3 Code webhook automation, reshapes and signs
 the event. A webhook wait names the routine and, as the routine editor does, an event type and JSON
-Pointer filters on `data` (`webhookMismatch` in `src/backend/webhook-trigger.ts`). Only a matching
-event of that routine wakes it; the routine run carries the event, as it does today.
+Pointer filters on `data`; `target` is the routine id and `conditions_json` holds the type and the
+filters. `RoutineScheduler.receiveWebhook` passes the event to `AgentWaits.wakeForRun`, which wakes
+the webhook waits of that routine that `webhookMismatch` (`src/backend/webhook-trigger.ts`) accepts.
+The routine run carries the event and the woken waits, as a routine run does. An event that does
+not match still runs the routine, without the wait. A run that a restart resumes has no event, so it
+wakes no webhook wait.
 
 ### GitHub pull request (stack layer 3)
 

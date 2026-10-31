@@ -60,6 +60,7 @@ const scheduler = new RoutineScheduler({
       emit: () => {},
       ownsRoutine: () => true,
       hasRoutine: () => true,
+      webhookRoutineName: () => null,
       requireKnownAgent: () => {},
       enqueueWake: () => Effect.die(new Error("Not used by this check.")),
       reportError: () => {},
