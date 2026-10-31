@@ -18,19 +18,19 @@ export const PULL_REQUEST_SWEEP_MS = 2 * 60_000;
  * Reads that fail in a row before the wait ends. A rate limit, or GitHub not answering, pauses the
  * sweep and is not a failure.
  */
-export const PULL_REQUEST_READ_FAILURE_LIMIT = 8;
+const PULL_REQUEST_READ_FAILURE_LIMIT = 8;
 const COMMENT_EXCERPT = 200;
 const READ_DEADLINE_MS = 30_000;
 const NEWS_ITEMS = 10;
 
 /** `transient`: a rate limit or no answer, which the next sweep tries again without counting it. */
-export class PullRequestReadFailed extends Schema.TaggedError<PullRequestReadFailed>()("PullRequestReadFailed", {
+class PullRequestReadFailed extends Schema.TaggedError<PullRequestReadFailed>()("PullRequestReadFailed", {
   reason: Schema.String,
   transient: Schema.Boolean,
 }) {}
 
 /** One pull request as the sweep reads it. */
-export interface PullRequestSnapshot {
+interface PullRequestSnapshot {
   state: "OPEN" | "CLOSED" | "MERGED";
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   headSha: string;
@@ -72,7 +72,7 @@ export function pullRequestSubject(target: PullRequestTarget): string {
 }
 
 /** The news of one read for one wait, and the cursor after it. Pure, so the sweep and a check share it. */
-export function evaluatePullRequest(
+function evaluatePullRequest(
   snapshot: PullRequestSnapshot,
   previous: Cursor | null,
   openedAt: string,
