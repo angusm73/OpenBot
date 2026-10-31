@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import type { AgentEvent } from "@openbot/contracts/ipc";
 import { type DynamicRecord, isDynamicRecord } from "@openbot/contracts/runtime-values";
+import { Effect } from "effect";
 import { ConversationRuntime } from "../src/backend/agent/conversation-runtime";
 import type { OpenBotToolResponse } from "../src/backend/agent/routine-tools";
 import { AgentStore } from "../src/backend/agent-store";
@@ -88,6 +89,8 @@ const waits = new AgentWaits({
     requireKnownAgent: (agentId) => {
       conversation.requireKnownAgent(agentId);
     },
+    enqueueWake: () => Effect.die(new Error("Not used by this check.")),
+    reportError: () => {},
   },
 });
 

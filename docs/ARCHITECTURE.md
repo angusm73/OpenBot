@@ -34,6 +34,7 @@ The architecture notes are in one file for each topic:
   - [Agent import](architecture/agents.md#agent-import)
   - [Instance transfer](architecture/agents.md#instance-transfer)
   - [Agent templates](architecture/agents.md#agent-templates)
+- [Open waits and their sources](architecture/agent-waits.md)
 - [Analytics](architecture/analytics.md)
   - [Mobile product analytics](architecture/analytics.md#mobile-product-analytics)
   - [Website analytics](architecture/analytics.md#website-analytics)

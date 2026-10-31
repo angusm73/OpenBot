@@ -4,6 +4,7 @@ import type {
   AgentExchangeSummary,
   AgentModelId,
   AgentReasoningEffort,
+  AgentWaitSource,
   AttachmentSummary,
   AvatarHue,
   ChannelRoutingConversationEvent,
@@ -156,6 +157,8 @@ export type ChatActionMarkerModel =
   | { kind: "vault-change"; text: string; timestamp: string }
   /** The agent continues by itself, because its plan still has open steps. `text` is the host's note. */
   | { kind: "plan-continuation"; text: string; timestamp: string }
+  /** An open wait woke the agent: the event of its source happened. `text` is the host's note. */
+  | { kind: "wait-wake"; source: AgentWaitSource; text: string; timestamp: string }
   | {
       kind: "unavailable";
       label: string;

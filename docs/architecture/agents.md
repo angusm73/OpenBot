@@ -408,8 +408,13 @@ MCP. An edit keeps the row's headers and environment, and an edit that would sen
 transport, origin, command, arguments or folder is refused. The approval masks known secrets in the command line and names
 the folder a stdio server starts in. A sign-in shows an `mcp-sign-in:<id>` card in
 the conversation. Its Sign in opens Server settings, MCP, and starts the row's normal sign-in, so a
-joined server signs in through its relay or live page. Continue sends a message that tells the agent
-to test again. A saved change reaches the agents from their next turn.
+joined server signs in through its relay or live page. In the agent's own chat, a card from
+`save_mcp_server` or `test_mcp_server` opens an `mcp-sign-in` wait ([open waits](agent-waits.md)); a
+card from a tool search does not. When a sign-in to that address ends, `AgentService.signInMcpServer`
+wakes the wait before it answers, so the agent tests the server without the user asking; the chat
+shows a line, not a message. A failed or cancelled sign-in sends its reason and keeps the wait; a
+sign-in that connects closes it. Continue sends a message that tells the agent to test again; the
+card hides it after the wake line. A saved change reaches the agents from their next turn.
 
 When its own tools fail, the agent checks its teammates. When a teammate reports that it is blocked
 or waits for the user, the requester does not repeat that work or send the same request again; it

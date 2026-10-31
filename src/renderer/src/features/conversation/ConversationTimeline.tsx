@@ -464,6 +464,24 @@ export function ConversationTimeline() {
     marker.kind === "mcp-sign-in"
       ? mcpServers().find((config) => config.id === marker.mcpServerId && config.transport === "http")
       : undefined;
+  /**
+   * The sign-in cards that the host already answered: when a sign-in ends, its wait wakes the agent
+   * and the chat shows the line, so the card has no Continue to press.
+   */
+  const answeredSignInIds = createMemo(() => {
+    const answered = new Set<string>();
+    let waiting: string[] = [];
+    for (const message of timelineMessages()) {
+      if (message.actionMarker?.kind === "mcp-sign-in") waiting.push(message.id);
+      else if (message.actionMarker?.kind === "wait-wake" && message.actionMarker.source === "mcp-sign-in") {
+        // The line names no server: it answers the card just above it.
+        const last = waiting.at(-1);
+        if (last) answered.add(last);
+        waiting = [];
+      }
+    }
+    return answered;
+  });
   const virtualMessageRows = createMemo(() => messageVirtualizer.getVirtualItems());
   const rail = createChatScrollRail({
     rows: timelineMessages,
@@ -831,6 +849,7 @@ export function ConversationTimeline() {
                                           <McpSignInChatCard
                                             config={config()}
                                             signedIn={props.mcpSignedIn?.(config().id) ?? false}
+                                            answered={answeredSignInIds().has(message()?.id ?? "")}
                                             onSignIn={
                                               props.onOpenMcpSignIn
                                                 ? (trigger) => props.onOpenMcpSignIn?.(config().id, trigger)

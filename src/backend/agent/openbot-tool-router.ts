@@ -75,7 +75,13 @@ import { HistoryTools } from "./history-tools";
 import type { HostedSiteCoordinator } from "./hosted-site-coordinator";
 import { isHostedSiteMutationTool } from "./hosted-site-events";
 import type { MailboxSync } from "./mailbox-sync";
-import { type AgentMcpServers, handleMcpServerTool, isMcpServerTool, searchSignIns } from "./mcp-tools";
+import {
+  type AgentMcpServers,
+  handleMcpServerTool,
+  isMcpServerTool,
+  mcpSignInTarget,
+  searchSignIns,
+} from "./mcp-tools";
 import {
   agentAccountSetup,
   listModelsPayload,
@@ -1247,7 +1253,8 @@ export class OpenBotToolRouter {
             Effect.map((decision) => decision === "accept"),
             toToolOperationFailed,
           ),
-      requestSignIn: (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config)),
+      requestSignIn: (config) =>
+        toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config, true)),
     });
   });
 
@@ -1274,7 +1281,7 @@ export class OpenBotToolRouter {
     return yield* searchSignIns(
       servers,
       configs.filter(({ name }) => names.has(name)),
-      (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config)),
+      (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config, false)),
     ).pipe(
       Effect.catch((failure) => {
         logger.warn("A tool search could not test an MCP server.", {
@@ -1287,18 +1294,37 @@ export class OpenBotToolRouter {
 
   /**
    * The card that signs in to a saved http server. One for each server and turn: a search and a
-   * test in the same turn, or the same search sent twice, ask for the same sign-in.
+   * test in the same turn, or the same search sent twice, ask for the same sign-in. With `wait`, in
+   * the agent's own chat, the card opens a wait, and the end of the sign-in starts the agent's next
+   * turn; the answer says whether it does. A search does not wait: the user did not ask for that server.
    */
-  #postMcpSignInCard(agentId: string, threadId: string, turnId: string, config: McpServerConfig): void {
+  #postMcpSignInCard(
+    agentId: string,
+    threadId: string,
+    turnId: string,
+    config: McpServerConfig,
+    wait: boolean,
+  ): boolean {
     const itemType = mcpSignInItemType({ mcpServerId: config.id });
     const messages = this.#conversation.ensureSnapshot(agentId, threadId).messages;
-    if (messages.some((message) => message.turnId === turnId && message.itemType === itemType)) return;
-    this.#postSystemCard(agentId, threadId, turnId, {
-      itemType,
-      text: sourceText("status.agent.mcpSignInRequested", { name: config.name }),
-      eventType: "mcp.sign_in_requested",
-      detail: { mcpServerId: config.id },
-    });
+    if (!messages.some((message) => message.turnId === turnId && message.itemType === itemType))
+      this.#postSystemCard(agentId, threadId, turnId, {
+        itemType,
+        text: sourceText("status.agent.mcpSignInRequested", { name: config.name }),
+        eventType: "mcp.sign_in_requested",
+        detail: { mcpServerId: config.id },
+      });
+    if (!wait || this.#conversation.isExecutionThread(threadId)) return false;
+    const opened = this.#waits.openForSource(
+      { agentId, turnId },
+      {
+        source: "mcp-sign-in",
+        target: mcpSignInTarget(config.url),
+        subject: config.name,
+        note: `The user's sign-in to the MCP server ${JSON.stringify(config.name)} on its Sign in card.`,
+      },
+    );
+    return opened !== null;
   }
 
   /** Adds the note that an agent changed the Vault. `text` names the item, never a secret. */

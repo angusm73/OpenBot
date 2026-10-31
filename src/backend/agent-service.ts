@@ -134,7 +134,7 @@ import type { QueueEditRequest } from "@openbot/contracts/team-protocol/queue-ed
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { classifyFailure } from "@openbot/telemetry";
-import { Cause, Deferred, Effect, Exit, Fiber, Result, Schema, Scope, Semaphore } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Option, Result, Schema, Scope, Semaphore } from "effect";
 import { AgentMemories } from "./agent/agent-memories";
 import { AgentRemoval, AgentRemovalFailed } from "./agent/agent-removal";
 import { AgentSettingsRefused } from "./agent/agent-settings-refused";
@@ -162,8 +162,13 @@ import type { FailureContext, FailureSignal } from "./agent/failure-signal";
 import { type AgentHostedSites, HostedSiteCoordinator } from "./agent/hosted-site-coordinator";
 import { ImageGenRuntime } from "./agent/image-gen-runtime";
 import { MailboxSync } from "./agent/mailbox-sync";
-import { type GitHubConnectorSource, McpGateway, type TestMcpServerOptions } from "./agent/mcp-gateway";
-import { mcpServersFromGateway } from "./agent/mcp-tools";
+import {
+  type GitHubConnectorSource,
+  McpGateway,
+  type McpGatewayFailed,
+  type TestMcpServerOptions,
+} from "./agent/mcp-gateway";
+import { mcpServersFromGateway, mcpSignInEvent } from "./agent/mcp-tools";
 import { MemoryHold } from "./agent/memory-hold";
 import { MEMORY_REVIEW_MESSAGES, MemoryReview } from "./agent/memory-review";
 import {
@@ -219,7 +224,7 @@ import type { AgentStore } from "./agent-store";
 import { AgentTasks } from "./agent-tasks/agent-tasks";
 import { type AgentThreadRecord, AgentThreadStore } from "./agent-threads/agent-thread-store";
 import { AgentWaitStore } from "./agent-waits/agent-wait-store";
-import { AgentWaits } from "./agent-waits/agent-waits";
+import { AgentWaits, type AgentWake } from "./agent-waits/agent-waits";
 import { automationRunCommand } from "./automation-command";
 import { toChannelOperationError } from "./channel-effects";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
@@ -637,6 +642,16 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         requireKnownAgent: (agentId) => {
           this.#conversation.requireKnownAgent(agentId);
         },
+        enqueueWake: (agentId, wake) =>
+          this.#sendUserMessage({ agentId, text: wake.line }, undefined, undefined, undefined, wake).pipe(
+            Effect.flatMap((receipt) => {
+              const deliveryId = receipt.deliveries[0]?.id;
+              return deliveryId
+                ? Effect.succeed(deliveryId)
+                : Effect.fail(new AgentLifecycleFailed({ operation: "wake", cause: new Error("No wake delivery.") }));
+            }),
+          ),
+        reportError: (cause, agentId) => this.#emitError("agent_wait_wake_failed", cause, agentId),
       },
     });
     this.#routines = new RoutineScheduler({
@@ -2005,15 +2020,19 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       );
   }
 
+  /** The end of a sign-in, also of a failed or cancelled one, wakes the agents whose Sign in card waits for it. */
   signInMcpServer(
     input: TestMcpServerInput,
     open?: McpSignInOpener,
   ): Effect.Effect<McpTestResult, AgentLifecycleFailed> {
-    return this.#mcp
-      .signIn(input, open)
-      .pipe(
-        Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "signInMcpServer", cause: failure.cause })),
-      );
+    return this.#mcp.signIn(input, open).pipe(
+      Effect.onExit((exit) => {
+        const error = signInError(exit);
+        // The wake is queued before the answer, so the card never offers Continue beside it.
+        return this.#waits.wake(mcpSignInEvent(input.config, error === null ? null : this.#mcp.redact(error)));
+      }),
+      Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "signInMcpServer", cause: failure.cause })),
+    );
   }
 
   cancelMcpSignIn(input: CancelMcpSignInInput): void {
@@ -4607,6 +4626,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     sender: ConversationMessageSender | undefined,
     timezone: string | undefined,
     idempotencyKey?: string,
+    /** A turn that a wait's source starts: `input.text` is its line. */
+    wake?: AgentWake,
   ) {
     const validateRecipient = yield* lifecycleStep("prepare message delivery", () =>
       this.#mailbox.prepareDelivery([input.agentId]),
@@ -4653,6 +4674,9 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         // A reply names a message of the agent's own chat, which a task does not show.
         replyToMessageId: task ? null : (input.replyToMessageId ?? null),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(wake
+          ? { wake: { waitId: wake.waitId, source: wake.source, prompt: wake.prompt, request: wake.request } }
+          : {}),
       })
       .pipe(
         Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "enqueue message", cause: failure.cause })),
@@ -5072,6 +5096,15 @@ export class AgentLifecycleFailed extends Schema.TaggedError<AgentLifecycleFaile
   operation: Schema.String,
   cause: Schema.Defect(),
 }) {}
+
+/** Why a sign-in ended without a connection, for the agents that wait for it. Null when it connected. */
+function signInError(exit: Exit.Exit<McpTestResult, McpGatewayFailed>): string | null {
+  if (Exit.isSuccess(exit)) return exit.value.error;
+  const failure = Cause.findErrorOption(exit.cause);
+  return Option.isSome(failure) && failure.value.cause instanceof Error
+    ? failure.value.cause.message
+    : sourceText("error.backend.mcpSignInAbandonedGeneric");
+}
 
 /** Why `#usageLimitMove` changes an agent's model, when it is not the switch for a usage limit. */
 type ModelMove = "return" | "provider-error" | "next-turn";

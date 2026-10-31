@@ -178,7 +178,7 @@ export function deliveryPromptInput(context: DeliveryContext, sources: DeliveryP
   const { delivery, managedAttachments } = context;
   const { agentNames, snapshot } = sources;
   const displayText = displayMessageReferences(delivery.text, delivery.attachments, agentNames);
-  let text = sources.executionText ?? (displayText || "The user shared attached local files.");
+  let text = context.wake?.prompt ?? sources.executionText ?? (displayText || "The user shared attached local files.");
   if (delivery.sender.kind === "user" && delivery.replyToMessageId) {
     const referenced = snapshot.messages.find((message) => message.id === delivery.replyToMessageId);
     text = [

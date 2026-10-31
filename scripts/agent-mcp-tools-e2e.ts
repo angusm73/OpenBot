@@ -160,6 +160,7 @@ try {
         requestSignIn: (config) =>
           Effect.sync(() => {
             signInCards.push(config.id);
+            return true;
           }),
       }),
     );

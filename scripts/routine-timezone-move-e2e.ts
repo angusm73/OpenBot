@@ -56,7 +56,14 @@ const scheduler = new RoutineScheduler({
   waits: new AgentWaits({
     store: new AgentWaitStore({ database }),
     mailbox,
-    hooks: { emit: () => {}, ownsRoutine: () => true, hasRoutine: () => true, requireKnownAgent: () => {} },
+    hooks: {
+      emit: () => {},
+      ownsRoutine: () => true,
+      hasRoutine: () => true,
+      requireKnownAgent: () => {},
+      enqueueWake: () => Effect.die(new Error("Not used by this check.")),
+      reportError: () => {},
+    },
   }),
   timezone: () => "UTC",
   hooks: {

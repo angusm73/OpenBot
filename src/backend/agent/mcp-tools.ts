@@ -9,6 +9,8 @@ import {
 import { sourceText } from "@openbot/i18n/source";
 import { Effect } from "effect";
 import { z } from "zod";
+import type { AgentWaitEvent } from "../agent-waits/agent-waits";
+import { normalizeResource } from "../mcp-oauth-provider";
 import type { McpProbeOutcome } from "../mcp-probe";
 import type { McpGateway, McpGatewayFailed } from "./mcp-gateway";
 import { profileToolErrorMessage } from "./profile-tools";
@@ -65,7 +67,7 @@ export const MCP_SERVER_TOOL_DEFINITIONS = [
   },
   {
     name: "save_mcp_server",
-    description: `Add an MCP server, or change one by its name, only when the user asks for it. ${MCP_SCOPE} ${MCP_APPROVAL} Then OpenBot connects to the server and saves it when it answers or needs only a sign-in or a key. The result is ready with its tools, needs_sign_in (a Sign in card is in the conversation: wait for the user), needs_key (the user enters the key in Server settings, MCP; never ask for a key in the chat), or the error. Headers and environment values are not set here: a stdio server that cannot start without a key in its environment is added by the user in Server settings, MCP. A server that holds keys keeps its transport, address origin, command, arguments and folder. New tools reach the agents from their next turn.`,
+    description: `Add an MCP server, or change one by its name, only when the user asks for it. ${MCP_SCOPE} ${MCP_APPROVAL} Then OpenBot connects to the server and saves it when it answers or needs only a sign-in or a key. The result is ready with its tools, needs_sign_in (a Sign in card is in the conversation: follow its next), needs_key (the user enters the key in Server settings, MCP; never ask for a key in the chat), or the error. Headers and environment values are not set here: a stdio server that cannot start without a key in its environment is added by the user in Server settings, MCP. A server that holds keys keeps its transport, address origin, command, arguments and folder. New tools reach the agents from their next turn.`,
     shape: saveMcpServerToolSchema.shape,
   },
   {
@@ -141,8 +143,11 @@ export interface McpServerToolCall {
    * starts in, when it names one. True when it is approved.
    */
   approve(reason: string, cwd?: string | null): Effect.Effect<boolean, ToolOperationFailed>;
-  /** Shows the user the card that signs in to a saved http server. */
-  requestSignIn(config: McpServerConfig): Effect.Effect<void, ToolOperationFailed>;
+  /**
+   * Shows the user the card that signs in to a saved http server. True when OpenBot starts the
+   * agent's next turn when that sign-in ends.
+   */
+  requestSignIn(config: McpServerConfig): Effect.Effect<boolean, ToolOperationFailed>;
 }
 
 /**
@@ -225,8 +230,45 @@ const findServer = (servers: AgentMcpServers, name: string) => {
     : Effect.fail(new ToolOperationFailed({ cause: new Error(sourceText("error.agent.mcpServerUnknown", { name })) }));
 };
 
-const SIGN_IN_NEXT =
-  "A Sign in card is in this conversation. Tell the user, end your turn, and test again when the user says it is done.";
+const signInNext = (watched: boolean) =>
+  watched
+    ? "A Sign in card is in this conversation. Tell the user to press Sign in, and end your turn. When the sign-in ends, OpenBot starts your next turn with the outcome. Do not wait or test again before that."
+    : "A Sign in card is in this conversation. Tell the user, end your turn, and test again when the user says it is done.";
+
+/** What a sign-in wait names its server by: the address, as the sign-ins keep it. */
+export function mcpSignInTarget(url: string): string {
+  return normalizeResource(url) ?? url;
+}
+
+/** The bound of the reason in a wake: it can be the error text of a remote server. */
+const WAKE_REASON_LIMIT = 1_000;
+
+/**
+ * The event of the end of a sign-in, for the waits of the server's Sign in cards. `error` is null
+ * when it connected; that ends the waits. A failed or cancelled sign-in keeps them, because the user
+ * can sign in again on the same card.
+ */
+export function mcpSignInEvent(config: Pick<McpServerConfig, "name" | "url">, error: string | null): AgentWaitEvent {
+  const server = JSON.stringify(config.name);
+  const base = { source: "mcp-sign-in", target: mcpSignInTarget(config.url) } as const;
+  if (error === null)
+    return {
+      ...base,
+      line: sourceText("status.agent.waitWokeSignedIn", { name: config.name }),
+      text: `The user's sign-in to the MCP server ${server} is done. Call openbot.test_mcp_server with name ${server} and tell the user the result.`,
+      final: true,
+    };
+  return {
+    ...base,
+    line: sourceText("status.agent.waitWokeSignInFailed", { name: config.name }),
+    text: [
+      `The user's sign-in to the MCP server ${server} did not finish.`,
+      `Reason, as the sign-in reported it: ${error.slice(0, WAKE_REASON_LIMIT)}`,
+      "Tell the user the reason in one sentence, and end your turn. The Sign in card stays in this conversation: when the user signs in again, OpenBot starts your next turn with the outcome.",
+    ].join("\n"),
+    final: false,
+  };
+}
 
 /**
  * A silent test of each saved http server that a tool search names and that has no sign-in on this
@@ -250,11 +292,11 @@ export const searchSignIns = Effect.fn("McpServerTools.searchSignIns")(function*
       Effect.gen(function* () {
         const outcome = yield* servers.inspect(config);
         if (outcome.needs !== "sign_in") return null;
-        yield* requestSignIn(config);
+        const watched = yield* requestSignIn(config);
         return {
           status: "needs_sign_in",
           server: describeServer(config, signIns),
-          next: `When the user's request needs this server: ${SIGN_IN_NEXT}`,
+          next: `When the user's request needs this server: ${signInNext(watched)}`,
         };
       }),
     { concurrency: "unbounded" },
@@ -284,11 +326,11 @@ const report = Effect.fnUntraced(function* (
     });
   const error = servers.redact(outcome.error);
   if (outcome.needs === "sign_in") {
-    yield* call.requestSignIn(saved);
+    const watched = yield* call.requestSignIn(saved);
     return openBotToolResult({
       status: "needs_sign_in",
       server,
-      next: SIGN_IN_NEXT,
+      next: signInNext(watched),
     });
   }
   if (outcome.needs === "key")

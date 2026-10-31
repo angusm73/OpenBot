@@ -231,6 +231,7 @@
     "test:mcp-server-unreadable-row": "bun scripts/mcp-server-unreadable-row-e2e.ts",
     "test:mcp-tool-consent": "bun scripts/mcp-tool-consent-e2e.ts",
     "test:agent-mcp-tools": "bun scripts/agent-mcp-tools-e2e.ts",
+    "test:mcp-sign-in-wake": "bun scripts/mcp-sign-in-wake-e2e.ts",
     "test:agent-update-agents": "bun scripts/agent-update-agents-e2e.ts",
     "test:ui-blocks": "bun scripts/ui-blocks-e2e.ts",
     "test:composer-attachments": "bun scripts/composer-attachments-e2e.ts",

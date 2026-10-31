@@ -1,6 +1,7 @@
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import type { AgentEvent, AgentWait, AgentWaitsSnapshot } from "@openbot/contracts/ipc";
+import type { AgentEvent, AgentWait, AgentWaitSource, AgentWaitsSnapshot } from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
+import { Cause, Effect } from "effect";
 import { z } from "zod";
 import { type OpenBotToolResponse, openBotToolFailure, openBotToolResult } from "../agent/routine-tools";
 import type { MailboxStore } from "../mailbox-store";
@@ -41,6 +42,33 @@ export interface AgentWaitsHooks {
   hasRoutine(agentId: string): boolean;
   /** Throws when no local agent has this id. */
   requireKnownAgent(agentId: string): void;
+  /** Queues the turn that a source event starts, as a line in the agent's own chat. Answers its delivery id. */
+  enqueueWake(agentId: string, wake: AgentWake): Effect.Effect<string, { readonly cause: unknown }>;
+  reportError(cause: unknown, agentId: string): void;
+}
+
+/**
+ * The turn that a wait's source starts: `line` is what the chat shows, `prompt` what the agent reads.
+ * `request` is the request the wait continues, so a wait that this turn opens serves it too.
+ */
+export interface AgentWake {
+  waitId: string;
+  source: AgentWaitSource;
+  line: string;
+  prompt: string;
+  request: { deliveryId: string; text: string };
+}
+
+/** An event of a source other than a routine run, for the waits of its target. */
+export interface AgentWaitEvent {
+  source: Exclude<AgentWaitSource, "routine">;
+  target: string;
+  /** The `status.agent.waitWoke*` sentence that the chat shows. */
+  line: string;
+  /** What happened, for the agent. Text from outside OpenBot is framed as data. */
+  text: string;
+  /** The event ends the waits: no later event of the target is needed. */
+  final: boolean;
 }
 
 export interface AgentWaitsOptions {
@@ -59,8 +87,10 @@ export interface AgentWaitCaller {
 /**
  * Open waits: work an agent stopped because it waits for something outside the turn. The agent
  * opens, lists and closes them with three tools, and another local agent can list and close them
- * with `agentId`; the user cancels them from the chat; a routine run of the agent wakes them. The input of the run that wakes a wait repeats the request and the note, so
- * the agent can continue the request after its context lost it.
+ * with `agentId`; the user cancels them from the chat. Each wait has a source that wakes it: a
+ * routine run of the agent, or an event of another source, such as the end of an MCP sign-in, which
+ * the host opens the wait for. The input of the turn that wakes a wait repeats the request and the
+ * note, so the agent can continue the request after its context lost it.
  *
  * It never imports the agent service facade.
  */
@@ -91,7 +121,9 @@ export class AgentWaits {
    * routine or has this routine. A wait whose last wake has not ended yet stays with that run.
    */
   wakeForRun(run: { agentId: string; routineId: string }, deliveryId: string, waitId: string | null): void {
+    // A script event names only a wait that a routine run wakes.
     const named = waitId ? this.#store.get(run.agentId, waitId) : null;
+    if (named && named.source !== "routine") return;
     const candidates = waitId ? (named ? [named] : []) : this.#store.forRoutineRun(run.agentId, run.routineId);
     const woken = candidates
       .filter((wait) => !wait.wakeDeliveryId || !this.#isPending(wait.wakeDeliveryId))
@@ -110,6 +142,77 @@ export class AgentWaits {
   wokenBy(deliveryId: string): AgentWait[] {
     return this.#store.wokenBy(deliveryId);
   }
+
+  /**
+   * Opens the wait of a source for the request of this turn, such as for a Sign in card. An open wait
+   * of the same agent, source, target and request stays the one wait; one for an earlier request is
+   * replaced. Null when the turn has no request or the agent has the most open waits: then nothing
+   * wakes the agent.
+   */
+  openForSource(
+    caller: { agentId: string; turnId: string },
+    input: { source: Exclude<AgentWaitSource, "routine">; target: string; subject: string; note: string },
+  ): AgentWait | null {
+    const request = this.#requestOf(caller.agentId, caller.turnId);
+    if (!request) return null;
+    const existing = this.#store.forSource(input.source, input.target, caller.agentId)[0];
+    if (existing?.requestMessageId === request.id) return existing;
+    if (existing) this.#store.delete(caller.agentId, existing.id);
+    try {
+      const wait = this.#store.open({
+        agentId: caller.agentId,
+        requestMessageId: request.id,
+        requestText: request.text,
+        note: input.note,
+        routineId: null,
+        source: { source: input.source, target: input.target, subject: input.subject },
+      });
+      this.#changed(caller.agentId);
+      return wait;
+    } catch (error) {
+      if (error instanceof AgentWaitLimitError) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Starts a turn of each agent whose wait watches this target, with the event and the request that
+   * the wait continues. A wait whose last wake has not ended yet stays with that turn, unless the
+   * event is final: then it closes the waits and always wakes them. A wake that fails, such as for an
+   * agent that is gone, closes the wait. A failure never reaches the caller, so the source's own
+   * result, such as a sign-in, stands.
+   */
+  readonly wake = Effect.fn("AgentWaits.wake")(function* (this: AgentWaits, event: AgentWaitEvent) {
+    const waits = this.#store
+      .forSource(event.source, event.target)
+      .filter((wait) => event.final || !wait.wakeDeliveryId || !this.#isPending(wait.wakeDeliveryId));
+    yield* Effect.forEach(waits, (wait) =>
+      this.#hooks
+        .enqueueWake(wait.agentId, {
+          waitId: wait.id,
+          source: event.source,
+          line: event.line,
+          prompt: wakePromptText(wait, event),
+          request: { deliveryId: wait.requestMessageId, text: wait.requestText },
+        })
+        .pipe(
+          Effect.tap((deliveryId) =>
+            Effect.sync(() =>
+              event.final
+                ? this.#store.delete(wait.agentId, wait.id)
+                : this.#store.markWoken(wait.agentId, [wait.id], deliveryId),
+            ),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.sync(() => {
+              this.#store.delete(wait.agentId, wait.id);
+              this.#hooks.reportError(Cause.squash(cause), wait.agentId);
+            }),
+          ),
+          Effect.ensuring(Effect.sync(() => this.#changed(wait.agentId))),
+        ),
+    );
+  });
 
   /** Answers `await_event`, `close_wait` and `list_waits`; null for every other tool. */
   handleTool(params: DynamicToolCallParams, caller: AgentWaitCaller): OpenBotToolResponse | null {
@@ -137,9 +240,7 @@ export class AgentWaits {
         waitIds: continued.map((wait) => wait.id),
         note: "This run continues these open waits. To wait again, leave them open and end your turn. Open a new wait only for a different request.",
       });
-    // The user's message comes first; a routine run that waits serves its own instruction.
-    const request =
-      deliveries.findLast((context) => context.delivery.sender.kind === "user") ?? deliveries.at(0) ?? null;
+    const request = this.#requestOf(caller.agentId, params.turnId);
     if (!request) return openBotToolFailure(sourceText("error.backend.agentWaitNoRequest"));
     if (routineId && !this.#hooks.ownsRoutine(caller.agentId, routineId))
       return openBotToolFailure(sourceText("error.backend.agentWaitRoutineGone"));
@@ -149,8 +250,8 @@ export class AgentWaits {
     try {
       wait = this.#store.open({
         agentId: caller.agentId,
-        requestMessageId: request.delivery.id,
-        requestText: request.delivery.text,
+        requestMessageId: request.id,
+        requestText: request.text,
         note,
         routineId: routineId ?? null,
       });
@@ -210,6 +311,19 @@ export class AgentWaits {
     });
   }
 
+  /**
+   * The request a wait opened in this turn serves. The user's message comes first; a routine run that
+   * waits serves its own instruction; a wake serves the request of the wait it woke.
+   */
+  #requestOf(agentId: string, turnId: string): { id: string; text: string } | null {
+    const deliveries = this.#mailbox.findDeliveriesByTurn(agentId, turnId);
+    const context =
+      deliveries.findLast((candidate) => candidate.delivery.sender.kind === "user") ?? deliveries.at(0) ?? null;
+    if (!context) return null;
+    if (context.wake) return { id: context.wake.request.deliveryId, text: context.wake.request.text };
+    return { id: context.delivery.id, text: context.delivery.text };
+  }
+
   /** The agent whose waits a tool call reads or closes. An unknown agent is a request the model can correct. */
   #waitOwner(agentId: string | undefined, caller: AgentWaitCaller): string {
     if (agentId === undefined || agentId === caller.agentId) return caller.agentId;
@@ -236,6 +350,8 @@ function waitSummary(wait: AgentWait) {
   return {
     waitId: wait.id,
     note: wait.note,
+    source: wait.source,
+    subject: wait.subject,
     openedAt: wait.createdAt,
     routineId: wait.routineId,
     wokenAt: wait.wokenAt,
@@ -257,5 +373,24 @@ export function wokenWaitsPromptText(waits: readonly AgentWait[]): string | null
       wait.requestText,
     ]),
     "--- end of open waits ---",
+  ].join("\n");
+}
+
+/** The input of the turn that a source event starts: the event, then the wait and the request it continues. */
+function wakePromptText(wait: AgentWait, event: AgentWaitEvent): string {
+  return [
+    "OpenBot note, not a message from the user: an event that one of your open waits waits for happened.",
+    "--- event ---",
+    event.text,
+    "--- the wait it wakes ---",
+    `Wait ID: ${wait.id}`,
+    `Opened: ${wait.createdAt}`,
+    `Your note: ${wait.note}`,
+    "The request it continues:",
+    wait.requestText,
+    "--- end of the wait ---",
+    event.final
+      ? "This event ends the wait: OpenBot closed it."
+      : `The wait stays open, and the next event of its source wakes you again. Call openbot.${CLOSE_WAIT_TOOL} with its wait id when the request is done or no longer needed.`,
   ].join("\n");
 }

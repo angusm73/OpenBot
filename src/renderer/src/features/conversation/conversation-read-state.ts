@@ -18,6 +18,7 @@ import {
   ROUTINE_QUIET_ANSWER_ITEM_TYPE,
   ROUTINE_RUN_EVENT_ITEM_TYPE_PREFIX,
   SKILL_EVENT_ITEM_TYPE_PREFIX,
+  WAIT_WAKE_ITEM_TYPE_PREFIX,
 } from "@openbot/contracts/ipc";
 import type { AgentMessage } from "@openbot/ui/data";
 
@@ -69,6 +70,7 @@ function isIncoming(message: { itemType?: string | undefined }, fromUser: boolea
     message.itemType !== CONVERSATION_SUBAGENTS_ITEM_TYPE &&
     message.itemType !== CONVERSATION_MEMORY_CHANGES_ITEM_TYPE &&
     message.itemType !== PLAN_CONTINUATION_ITEM_TYPE &&
+    !message.itemType?.startsWith(WAIT_WAKE_ITEM_TYPE_PREFIX) &&
     message.itemType !== ROUTINE_QUIET_ANSWER_ITEM_TYPE &&
     !isRoutineEventItem(message)
   );
