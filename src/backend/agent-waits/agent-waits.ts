@@ -49,7 +49,7 @@ export const awaitEventToolSchema = z.strictObject({
         .string()
         .trim()
         .regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u)
-        .describe("owner/name, such as nightly-labs/openbot."),
+        .describe("owner/name"),
       number: z.number().int().positive(),
     })
     .optional()
