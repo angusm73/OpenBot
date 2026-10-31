@@ -121,7 +121,7 @@ interface StoredMessage {
 }
 
 /** `source` is any string: a newer build can write a source that this one does not know. */
-export interface StoredWake {
+interface StoredWake {
   waitId: string;
   source: string;
   prompt: string;
