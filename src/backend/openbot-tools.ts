@@ -534,7 +534,7 @@ export const OPENBOT_TOOL_DEFINITIONS: readonly OpenBotToolDefinition[] = [
   {
     name: AWAIT_EVENT_TOOL,
     description:
-      "Open a wait when you cannot finish the current request in this turn because you wait for something outside it: a build, a deploy, a later check. OpenBot shows the wait to the user until you close it. The next run of one of your routines wakes the wait, or a local script event that names its waitId. The run that wakes it repeats the request and your note. Give routineId to let only that routine wake it. To wait for one event from another system, such as the checks of one pull request, give webhook with one of your webhook routines and the event type and filters that match only that event. After this call, tell the user what you wait for and end your turn.",
+      "Open a wait when you cannot finish the current request in this turn because you wait for something outside it: a build, a deploy, a later check. OpenBot shows the wait to the user until you close it. The next run of one of your routines wakes the wait, or a local script event that names its waitId. The run that wakes it repeats the request and your note. Give routineId to let only that routine wake it, or webhook for one event of a webhook routine. After this call, tell the user what you wait for and end your turn.",
     shape: awaitEventToolSchema.shape,
   },
   {

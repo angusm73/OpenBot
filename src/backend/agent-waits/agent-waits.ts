@@ -32,13 +32,11 @@ export const awaitEventToolSchema = z.strictObject({
   webhook: z
     .strictObject({
       routineId: z.string().trim().min(1).max(INPUT_LIMITS.identifier).describe("One of your webhook routines."),
-      eventType: webhookEventTypeZodSchema.optional(),
-      filters: webhookFiltersZodSchema.optional(),
+      eventType: webhookEventTypeZodSchema.optional().describe('The event "type".'),
+      filters: webhookFiltersZodSchema.optional().describe("Every filter must match."),
     })
     .optional()
-    .describe(
-      "Wait for one event of a webhook routine: only a run whose event has this type and matches every filter wakes the wait. Use it instead of routineId.",
-    ),
+    .describe("Only a run with a matching event wakes the wait. Not with routineId."),
 });
 
 export const closeWaitToolSchema = z.strictObject({
