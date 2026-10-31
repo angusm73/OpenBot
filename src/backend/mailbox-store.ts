@@ -29,6 +29,7 @@ import {
   isConversationMessageSender,
   isMessageReaction,
   QUEUE_STEER_FALLBACKS,
+  waitWakeItemType,
 } from "@openbot/contracts/ipc";
 import { type DynamicRecord, isNumber, isOneOf, isString } from "@openbot/contracts/runtime-values";
 import { QueueEditRejectedError } from "@openbot/contracts/team-protocol/queue-edit-v1";
@@ -110,7 +111,22 @@ interface StoredMessage {
    * what every message stored before this field existed meant.
    */
   expectsReply?: false;
+  /**
+   * A turn that a wait's source started, not a message the user wrote. `text` is the line the chat
+   * shows; the agent reads `prompt`. The sender stays `user`, because every released queue codec
+   * knows only the user, agent and routine senders.
+   */
+  wake?: StoredWake;
   createdAt: string;
+}
+
+/** `source` is any string: a newer build can write a source that this one does not know. */
+export interface StoredWake {
+  waitId: string;
+  source: string;
+  prompt: string;
+  /** The request the woken wait continues. */
+  request: { deliveryId: string; text: string };
 }
 
 type QueueEditOutcome = "save" | "cancel";
@@ -202,6 +218,7 @@ interface EnqueueInput {
   voiceRecordingDraftId?: string;
   sourcePaths?: string[];
   idempotencyKey?: string;
+  wake?: StoredWake;
 }
 
 /** A file a chat message carries or an agent made, as the Storage view lists it. */
@@ -223,6 +240,8 @@ export interface DeliveryContext {
   resumeAfterUsageLimit?: UsageLimitContinuation;
   planContinuation?: PlanContinuationMarker;
   channelId?: string;
+  /** A turn that a wait's source started: the agent reads `prompt` in place of the message text. */
+  wake?: Pick<StoredWake, "source" | "prompt" | "request">;
 }
 
 const EMPTY_STATE: StoredState = {
@@ -598,6 +617,7 @@ export class MailboxStore {
         ...(voiceRecording ? { voiceRecording } : {}),
         replyToMessageId: input.replyToMessageId ?? null,
         ...(input.expectsReply === false ? { expectsReply: false as const } : {}),
+        ...(input.wake ? { wake: input.wake } : {}),
         createdAt,
       };
       const deliveries = recipients.map<StoredDelivery>((recipientAgentId) => ({
@@ -1201,8 +1221,14 @@ export class MailboxStore {
           id: delivery.id,
           // A plan continuation keeps the request in its first turn, like `syncDeliveryMessage`.
           turnId: storedDelivery.planContinuation?.turnIds[0] ?? storedDelivery.turnId ?? undefined,
-          author: message.sender.kind === "agent" ? "agent" : "user",
-          source: message.sender.kind === "agent" ? "agent" : message.sender.kind === "routine" ? "routine" : "user",
+          author: message.wake ? "system" : message.sender.kind === "agent" ? "agent" : "user",
+          source: message.wake
+            ? "system"
+            : message.sender.kind === "agent"
+              ? "agent"
+              : message.sender.kind === "routine"
+                ? "routine"
+                : "user",
           text: message.text,
           senderAgentId: message.sender.kind === "agent" ? message.sender.agentId : undefined,
           ...(message.senderMember ? { senderMember: { ...message.senderMember } } : {}),
@@ -1248,8 +1274,9 @@ export class MailboxStore {
               : undefined,
           createdAt: storedDelivery.steeredAt ?? message.createdAt,
           status: delivery.status === "failed" ? "failed" : "completed",
-          itemType:
-            message.sender.kind === "agent"
+          itemType: message.wake
+            ? waitWakeItemType(message.wake.source)
+            : message.sender.kind === "agent"
               ? AGENT_EXCHANGE_ITEM_TYPE
               : message.sender.kind === "routine"
                 ? "routine"
@@ -2705,6 +2732,9 @@ export class MailboxStore {
       ...(delivery.resumeAfterUsageLimit ? { resumeAfterUsageLimit: delivery.resumeAfterUsageLimit } : {}),
       ...(delivery.planContinuation ? { planContinuation: delivery.planContinuation } : {}),
       ...(message.channelId ? { channelId: message.channelId } : {}),
+      ...(message.wake
+        ? { wake: { source: message.wake.source, prompt: message.wake.prompt, request: message.wake.request } }
+        : {}),
       managedAttachments: message.attachments.map((attachment) => ({
         ...toAttachmentSummary(attachment),
         path: attachment.path,
@@ -3110,6 +3140,14 @@ function isStoredMessage(value: unknown): value is StoredMessage {
     (value.voiceRecording === undefined || isStoredAttachment(value.voiceRecording)) &&
     (isString(value.replyToMessageId) || value.replyToMessageId === null) &&
     (value.expectsReply === undefined || value.expectsReply === false) &&
+    (value.wake === undefined ||
+      (isRecord(value.wake) &&
+        isString(value.wake.waitId) &&
+        isString(value.wake.source) &&
+        isString(value.wake.prompt) &&
+        isRecord(value.wake.request) &&
+        isString(value.wake.request.deliveryId) &&
+        isString(value.wake.request.text))) &&
     isString(value.createdAt)
   );
 }

@@ -1,3 +1,4 @@
+import type { AgentWaitSource } from "@openbot/contracts/ipc";
 import { buttonVariants, DropdownMenu, Ellipsis, MessageCircle, X } from "@openbot/ui";
 import { createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import { useText } from "../../text";
@@ -13,6 +14,10 @@ export interface OpenWaitItem {
   id: string;
   /** The agent's note: what it waits for and what it does next. */
   note: string;
+  /** What wakes the wait. A wait the host opened shows its source, not the note. */
+  source: AgentWaitSource;
+  /** What the source watches, such as an MCP server name. */
+  subject: string | null;
   /** The message that the wait continues. */
   request: string;
   /** When the agent opened the wait, as an ISO time. */
@@ -43,6 +48,13 @@ const STATE_LABEL = {
   woken: "chat.waits.state.woken",
 } as const;
 
+/** The row title of a wait: the agent's note, or what the host waits for. */
+function useWaitTitle() {
+  const { t } = useText();
+  return (item: OpenWaitItem) =>
+    item.source === "mcp-sign-in" ? t("chat.waits.source.mcpSignIn", { name: item.subject ?? "" }) : item.note;
+}
+
 /**
  * The work that an agent stopped because it waits for something outside its turn: one row for each
  * open wait, above the composer. It has the card of "Waiting for replies", and it renders nothing
@@ -58,6 +70,7 @@ export function OpenWaits(props: OpenWaitsProps) {
 
 function OpenWaitList(props: OpenWaitsProps) {
   const { t, format } = useText();
+  const title = useWaitTitle();
   const panelId = createUniqueId();
   const playState = createTaskListPlayState();
   const [open, setOpen] = createSignal(untrack(() => props.defaultOpen ?? true));
@@ -66,6 +79,10 @@ function OpenWaitList(props: OpenWaitsProps) {
   const woken = () => props.items.filter((item) => item.state === "woken").length;
   const wokenCount = () => (woken() > 0 ? t("chat.waits.woken", { count: woken() }) : "");
   const lead = () => props.items.find((item) => item.state === "resuming") ?? props.items[0];
+  const leadTitle = () => {
+    const item = lead();
+    return item ? title(item) : "";
+  };
   const openedAt = (value: string) => {
     const date = new Date(value);
     return date.toDateString() === now().toDateString()
@@ -92,7 +109,7 @@ function OpenWaitList(props: OpenWaitsProps) {
               id: lead()?.id ?? "",
               label: t("chat.waits.active", {
                 state: t(STATE_LABEL[lead()?.state ?? "waiting"]),
-                note: lead()?.note ?? "",
+                note: leadTitle(),
               }),
             }
           }
@@ -114,7 +131,7 @@ function OpenWaitList(props: OpenWaitsProps) {
                   <TaskMark state={MARK_STATE[item().state]} />
                 </span>
                 <span class="open-waits-row-text">
-                  <span class="open-waits-row-note">{item().note}</span>
+                  <span class="open-waits-row-note">{title(item())}</span>
                   <span class="open-waits-row-meta">
                     <span class="open-waits-row-state">{t(STATE_LABEL[item().state])}</span>
                     <span aria-hidden="true">·</span>
@@ -126,7 +143,7 @@ function OpenWaitList(props: OpenWaitsProps) {
                 <DropdownMenu.Root placement="bottom-end" gutter={4}>
                   <DropdownMenu.Trigger
                     class={buttonVariants({ variant: "ghost", size: "icon-xs", class: "open-waits-menu" })}
-                    aria-label={t("chat.waits.actions", { note: item().note })}
+                    aria-label={t("chat.waits.actions", { note: title(item()) })}
                   >
                     <Ellipsis aria-hidden="true" />
                   </DropdownMenu.Trigger>

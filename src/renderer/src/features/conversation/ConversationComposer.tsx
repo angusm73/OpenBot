@@ -803,6 +803,8 @@ function openWaitItems(waits: readonly AgentWait[], queue: QueueSnapshot | undef
   return waits.map((wait) => ({
     id: wait.id,
     note: wait.note,
+    source: wait.source,
+    subject: wait.subject,
     request: wait.requestText,
     openedAt: wait.createdAt,
     state: wait.wakeDeliveryId && pending.has(wait.wakeDeliveryId) ? "resuming" : wait.wokenAt ? "woken" : "waiting",

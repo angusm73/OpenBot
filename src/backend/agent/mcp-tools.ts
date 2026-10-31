@@ -1,6 +1,5 @@
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import {
-  MCP_SIGN_IN_WAKE_PREFIX,
   MCP_TRANSPORTS,
   type McpServerConfig,
   type McpSignInState,
@@ -10,6 +9,7 @@ import {
 import { sourceText } from "@openbot/i18n/source";
 import { Effect } from "effect";
 import { z } from "zod";
+import type { AgentWaitEvent } from "../agent-waits/agent-waits";
 import { normalizeResource } from "../mcp-oauth-provider";
 import type { McpProbeOutcome } from "../mcp-probe";
 import type { McpGateway, McpGatewayFailed } from "./mcp-gateway";
@@ -235,7 +235,7 @@ const signInNext = (watched: boolean) =>
     ? "A Sign in card is in this conversation. Tell the user to press Sign in, and end your turn. When the sign-in ends, OpenBot starts your next turn with the outcome. Do not wait or test again before that."
     : "A Sign in card is in this conversation. Tell the user, end your turn, and test again when the user says it is done.";
 
-/** What a sign-in watch names its server by: the address, as the sign-ins keep it. */
+/** What a sign-in wait names its server by: the address, as the sign-ins keep it. */
 export function mcpSignInTarget(url: string): string {
   return normalizeResource(url) ?? url;
 }
@@ -243,16 +243,31 @@ export function mcpSignInTarget(url: string): string {
 /** The bound of the reason in a wake: it can be the error text of a remote server. */
 const WAKE_REASON_LIMIT = 1_000;
 
-/** The message that starts the agent's turn when a sign-in that it waits for ends. `error` is null on success. */
-export function mcpSignInEndedText(name: string, error: string | null): string {
-  const server = JSON.stringify(name);
-  return error === null
-    ? `${MCP_SIGN_IN_WAKE_PREFIX} ${server} is done. Call openbot.test_mcp_server with name ${server} and tell the user the result.`
-    : [
-        `${MCP_SIGN_IN_WAKE_PREFIX} ${server} did not finish.`,
-        `Reason, as the sign-in reported it: ${error.slice(0, WAKE_REASON_LIMIT)}`,
-        "Tell the user the reason in one sentence, and end your turn. The Sign in card stays in this conversation: when the user signs in again, OpenBot starts your next turn with the outcome.",
-      ].join("\n");
+/**
+ * The event of the end of a sign-in, for the waits of the server's Sign in cards. `error` is null
+ * when it connected; that ends the waits. A failed or cancelled sign-in keeps them, because the user
+ * can sign in again on the same card.
+ */
+export function mcpSignInEvent(config: Pick<McpServerConfig, "name" | "url">, error: string | null): AgentWaitEvent {
+  const server = JSON.stringify(config.name);
+  const base = { source: "mcp-sign-in", target: mcpSignInTarget(config.url) } as const;
+  if (error === null)
+    return {
+      ...base,
+      line: sourceText("status.agent.waitWokeSignedIn", { name: config.name }),
+      text: `The user's sign-in to the MCP server ${server} is done. Call openbot.test_mcp_server with name ${server} and tell the user the result.`,
+      final: true,
+    };
+  return {
+    ...base,
+    line: sourceText("status.agent.waitWokeSignInFailed", { name: config.name }),
+    text: [
+      `The user's sign-in to the MCP server ${server} did not finish.`,
+      `Reason, as the sign-in reported it: ${error.slice(0, WAKE_REASON_LIMIT)}`,
+      "Tell the user the reason in one sentence, and end your turn. The Sign in card stays in this conversation: when the user signs in again, OpenBot starts your next turn with the outcome.",
+    ].join("\n"),
+    final: false,
+  };
 }
 
 /**

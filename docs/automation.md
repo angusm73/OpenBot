@@ -140,7 +140,9 @@ set to skip at the limit drops the run instead, and its run history shows it as 
 | 415 | `Content-Type` is not `application/json`. |
 | 429 | The agent got 30 runs from local scripts in the last hour. |
 
-An agent can have at most 20 open waits. `openbot.list_waits` shows an agent's open waits with their
+The host also opens waits, such as for an MCP Sign in card; their source wakes them, not a routine
+run ([open waits and their sources](architecture/agent-waits.md)). An agent can have at most 20 open
+waits, of all sources. `openbot.list_waits` shows an agent's open waits with their source and their
 IDs, and `openbot.close_wait` closes one by ID. With `agentId`, both tools act on another local
 agent's waits, as the routine tools do. `openbot.list_agents` shows `openWaits` for each agent that
 has open waits.

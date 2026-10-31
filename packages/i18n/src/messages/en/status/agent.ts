@@ -56,4 +56,6 @@ export const messages = defineMessages("status.agent", {
   "status.agent.vaultUpdated": "Changed in Vault: {name}",
   "status.agent.vaultDeleted": "Deleted from Vault: {name}",
   "status.agent.planContinues": "The plan has open steps. The agent continues ({current} of {limit}).",
+  "status.agent.waitWokeSignedIn": "The sign-in to {name} is done. The agent continues.",
+  "status.agent.waitWokeSignInFailed": "The sign-in to {name} did not finish. The agent continues.",
 });

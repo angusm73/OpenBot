@@ -1,5 +1,5 @@
 import { chatVisualReply } from "@openbot/contracts/chat-visual";
-import { type ConversationMessageSender, MCP_SIGN_IN_WAKE_PREFIX, type MessageReaction } from "@openbot/contracts/ipc";
+import type { ConversationMessageSender, MessageReaction } from "@openbot/contracts/ipc";
 import type { ConversationUiBlock } from "@openbot/contracts/ui-blocks";
 import { Button } from "@openbot/ui";
 import type { AgentMessage, ChatActionMarkerModel } from "@openbot/ui/data";
@@ -465,16 +465,18 @@ export function ConversationTimeline() {
       ? mcpServers().find((config) => config.id === marker.mcpServerId && config.transport === "http")
       : undefined;
   /**
-   * The sign-in cards that the host already answered: when a sign-in ends, it sends the agent a
-   * message, so the card has no Continue to press.
+   * The sign-in cards that the host already answered: when a sign-in ends, its wait wakes the agent
+   * and the chat shows the line, so the card has no Continue to press.
    */
   const answeredSignInIds = createMemo(() => {
     const answered = new Set<string>();
     let waiting: string[] = [];
     for (const message of timelineMessages()) {
       if (message.actionMarker?.kind === "mcp-sign-in") waiting.push(message.id);
-      else if (message.author === "you" && message.body.startsWith(MCP_SIGN_IN_WAKE_PREFIX)) {
-        for (const id of waiting) answered.add(id);
+      else if (message.actionMarker?.kind === "wait-wake" && message.actionMarker.source === "mcp-sign-in") {
+        // The line names no server: it answers the card just above it.
+        const last = waiting.at(-1);
+        if (last) answered.add(last);
         waiting = [];
       }
     }

@@ -168,7 +168,7 @@ import {
   type McpGatewayFailed,
   type TestMcpServerOptions,
 } from "./agent/mcp-gateway";
-import { mcpServersFromGateway, mcpSignInEndedText, mcpSignInTarget } from "./agent/mcp-tools";
+import { mcpServersFromGateway, mcpSignInEvent } from "./agent/mcp-tools";
 import { MemoryHold } from "./agent/memory-hold";
 import { MEMORY_REVIEW_MESSAGES, MemoryReview } from "./agent/memory-review";
 import {
@@ -224,8 +224,7 @@ import type { AgentStore } from "./agent-store";
 import { AgentTasks } from "./agent-tasks/agent-tasks";
 import { type AgentThreadRecord, AgentThreadStore } from "./agent-threads/agent-thread-store";
 import { AgentWaitStore } from "./agent-waits/agent-wait-store";
-import { AgentWaits } from "./agent-waits/agent-waits";
-import { AgentWatches } from "./agent-watches/agent-watches";
+import { AgentWaits, type AgentWake } from "./agent-waits/agent-waits";
 import { automationRunCommand } from "./automation-command";
 import { toChannelOperationError } from "./channel-effects";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
@@ -439,7 +438,6 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #memories: AgentMemories;
   readonly #memoryReview: MemoryReview;
   readonly #waits: AgentWaits;
-  readonly #watches: AgentWatches;
   readonly #tasks: AgentTasks;
   readonly #tables: AgentTables | null;
   readonly #routines: RoutineScheduler;
@@ -644,11 +642,17 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         requireKnownAgent: (agentId) => {
           this.#conversation.requireKnownAgent(agentId);
         },
+        enqueueWake: (agentId, wake) =>
+          this.#sendUserMessage({ agentId, text: wake.line }, undefined, undefined, undefined, wake).pipe(
+            Effect.flatMap((receipt) => {
+              const deliveryId = receipt.deliveries[0]?.id;
+              return deliveryId
+                ? Effect.succeed(deliveryId)
+                : Effect.fail(new AgentLifecycleFailed({ operation: "wake", cause: new Error("No wake delivery.") }));
+            }),
+          ),
+        reportError: (cause, agentId) => this.#emitError("agent_wait_wake_failed", cause, agentId),
       },
-    });
-    this.#watches = new AgentWatches({
-      wake: (agentId, text) => this.sendMessage({ agentId, text }),
-      reportError: (cause, agentId) => this.#emitError("agent_watch_wake_failed", cause, agentId),
     });
     this.#routines = new RoutineScheduler({
       timer: this.#routineTimer,
@@ -1489,7 +1493,6 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       routines: this.#routines,
       memories: this.#memories,
       waits: this.#waits,
-      watches: this.#watches,
       tasks: this.#tasks,
       drain: this.#drain,
       tables: this.#tables,
@@ -2025,14 +2028,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     return this.#mcp.signIn(input, open).pipe(
       Effect.onExit((exit) => {
         const error = signInError(exit);
-        // A failed or cancelled sign-in keeps the watch: the user can sign in again on the same card.
         // The wake is queued before the answer, so the card never offers Continue beside it.
-        return this.#watches.notify({
-          source: "mcp-sign-in",
-          target: mcpSignInTarget(input.config.url),
-          text: mcpSignInEndedText(input.config.name, error === null ? null : this.#mcp.redact(error)),
-          final: error === null,
-        });
+        return this.#waits.wake(mcpSignInEvent(input.config, error === null ? null : this.#mcp.redact(error)));
       }),
       Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "signInMcpServer", cause: failure.cause })),
     );
@@ -4629,6 +4626,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     sender: ConversationMessageSender | undefined,
     timezone: string | undefined,
     idempotencyKey?: string,
+    /** A turn that a wait's source starts: `input.text` is its line. */
+    wake?: AgentWake,
   ) {
     const validateRecipient = yield* lifecycleStep("prepare message delivery", () =>
       this.#mailbox.prepareDelivery([input.agentId]),
@@ -4675,6 +4674,9 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         // A reply names a message of the agent's own chat, which a task does not show.
         replyToMessageId: task ? null : (input.replyToMessageId ?? null),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(wake
+          ? { wake: { waitId: wake.waitId, source: wake.source, prompt: wake.prompt, request: wake.request } }
+          : {}),
       })
       .pipe(
         Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "enqueue message", cause: failure.cause })),

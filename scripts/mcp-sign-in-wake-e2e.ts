@@ -3,10 +3,12 @@
 // with a fake Codex app-server and a local MCP server that refuses requests without a sign-in.
 // The current message names one OpenBot tool call in `<<CALL{...}CALL>>`; every other turn answers.
 // Checks:
-//   1. test_mcp_server posts the Sign in card and tells the agent that OpenBot wakes it.
-//   2. A sign-in that does not finish starts a turn with the reason, and the watch stays.
-//   3. A sign-in that connects starts a turn that tells the agent to test the server, and ends the watch.
-//   4. A sign-in that no card waits for starts no turn.
+//   1. test_mcp_server posts the Sign in card and opens a sign-in wait.
+//   2. A sign-in that does not finish starts a turn with the reason and the request. The chat shows
+//      a line, not a message from the user, and the wait stays open.
+//   3. The wait survives a restart. A sign-in that connects starts a turn that tells the agent to
+//      test the server, and closes the wait, also while the wake of a failed sign-in is pending.
+//   4. A sign-in that no wait waits for starts no turn.
 // Not checked: the browser sign-in itself (this profile has no OAuth store, as in
 // agent-mcp-tools-e2e.ts; a cancel ends the same way, with its reason), and the card's Continue
 // button in the renderer.
@@ -18,7 +20,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { AGENT_PROVIDERS, mcpSignInItemType } from "@openbot/contracts/ipc";
+import { AGENT_PROVIDERS, mcpSignInItemType, waitWakeItemType } from "@openbot/contracts/ipc";
 import { Effect } from "effect";
 import type { AgentBrowserHost } from "../src/backend/agent/turn-lifecycle";
 
@@ -28,7 +30,8 @@ const userData = join(root, "user-data");
 const home = join(root, "home");
 const fakeCodex = join(root, "codex");
 const fakeLog = join(root, "codex.jsonl");
-const NOTE = "OpenBot note: the sign-in to the MCP server";
+const SIGNED_IN = 'sign-in to the MCP server "Notes" is done.';
+const NOTE = "OpenBot note, not a message from the user: an event that one of your open waits waits for happened.";
 
 // Before the service modules load: the Codex process and the stores read the home folder.
 process.env.HOME = home;
@@ -214,26 +217,40 @@ assert.ok(address !== null && typeof address === "object");
 const mcpUrl = `http://127.0.0.1:${address.port}/mcp`;
 
 await writeFile(fakeCodex, FAKE_CODEX, { mode: 0o755 });
-const database = new OpenBotDatabase(userData);
-const store = new AgentStore(userData, home, database);
-const mailbox = new MailboxStore(userData, store.sharedRoot, store.database);
-const service = new AgentService({
-  store,
-  mailbox,
-  browser,
-  preferredProvider: "codex",
-  offProviders: AGENT_PROVIDERS.filter((provider) => provider !== "codex"),
-});
+
+function openService() {
+  const database = new OpenBotDatabase(userData);
+  const store = new AgentStore(userData, home, database);
+  const mailbox = new MailboxStore(userData, store.sharedRoot, store.database);
+  const service = new AgentService({
+    store,
+    mailbox,
+    browser,
+    preferredProvider: "codex",
+    offProviders: AGENT_PROVIDERS.filter((provider) => provider !== "codex"),
+  });
+  return { database, store, service };
+}
+
+let current = openService();
 
 const ended = (status: string | undefined) =>
   status === "completed" || status === "failed" || status === "interrupted" || status === "cancelled";
-const idle = (agentId: string) => service.listQueue(agentId).deliveries.every((delivery) => ended(delivery.status));
+const idle = (agentId: string) =>
+  current.service.listQueue(agentId).deliveries.every((delivery) => ended(delivery.status));
 const call = (tool: string, args: Record<string, string>) => `<<CALL${JSON.stringify({ tool, arguments: args })}CALL>>`;
+const chat = (agentId: string) =>
+  current.database.readConversation(
+    agentId,
+    current.store.list().find((entry) => entry.id === agentId)?.threadId ?? null,
+  ).messages;
+const wakeLines = (agentId: string) =>
+  chat(agentId).filter((message) => message.itemType === waitWakeItemType("mcp-sign-in"));
 
 try {
-  await runCauseEffect(service.initialize());
+  await runCauseEffect(current.service.initialize());
   const saved = await runCauseEffect(
-    service.saveMcpServer({
+    current.service.saveMcpServer({
       config: {
         id: "",
         name: "Notes",
@@ -252,7 +269,7 @@ try {
   const server = saved.find((config) => config.name === "Notes");
   assert.ok(server, "The server is saved.");
   const agent = await runCauseEffect(
-    service.createAgent({
+    current.service.createAgent({
       name: "Connector",
       description: "Adds MCP servers.",
       avatarSeed: "connector",
@@ -261,25 +278,31 @@ try {
     }),
   );
   await waitFor("the first turn", () => idle(agent.id));
-  const signIn = () => runCauseEffect(service.signInMcpServer({ config: server }));
+  const signIn = () => runCauseEffect(current.service.signInMcpServer({ config: server }));
 
-  await check("test_mcp_server posts the Sign in card and says that OpenBot wakes the agent", async () => {
-    const receipt = await runCauseEffect(
-      service.sendMessage({ agentId: agent.id, text: `Test Notes. ${call("test_mcp_server", { name: "Notes" })}` }),
+  await check("test_mcp_server posts the Sign in card and opens a sign-in wait", async () => {
+    await runCauseEffect(
+      current.service.sendMessage({
+        agentId: agent.id,
+        text: `Test Notes. ${call("test_mcp_server", { name: "Notes" })}`,
+      }),
     );
-    await waitFor("the test turn", () => idle(agent.id) && receipt.deliveries.length > 0);
+    await waitFor("the test turn", () => logged().some((entry) => entry.method === "toolResult") && idle(agent.id));
     const result = logged().findLast((entry) => entry.method === "toolResult")?.result?.contentItems?.[0]?.text ?? "";
     assert.ok(result.includes('"needs_sign_in"'), result);
     assert.ok(result.includes("OpenBot starts your next turn with the outcome"), result);
-    const threadId = store.list().find((entry) => entry.id === agent.id)?.threadId ?? null;
-    const card = database
-      .readConversation(agent.id, threadId)
-      .messages.find((message) => message.itemType === mcpSignInItemType({ mcpServerId: server.id }));
+    const card = chat(agent.id).find((message) => message.itemType === mcpSignInItemType({ mcpServerId: server.id }));
     assert.ok(card, "The Sign in card is in the chat.");
-    return { result: JSON.parse(result) };
+    const waits = current.service.listWaits(agent.id).waits;
+    assert.deepEqual(
+      waits.map((wait) => [wait.source, wait.subject, wait.wokenAt]),
+      [["mcp-sign-in", "Notes", null]],
+      "One sign-in wait is open.",
+    );
+    return { result: JSON.parse(result), waits };
   });
 
-  await check("a sign-in that does not finish starts a turn with the reason", async () => {
+  await check("a sign-in that does not finish starts a turn with the reason, as a line", async () => {
     const before = turnTexts().length;
     const outcome = await signIn();
     assert.notEqual(outcome.error, null, "The server still refuses.");
@@ -290,32 +313,65 @@ try {
     );
     assert.ok(text.includes('"Notes" did not finish.'), text);
     assert.ok(text.includes(`Reason, as the sign-in reported it: ${outcome.error}`), text);
+    assert.ok(text.includes("Test Notes."), "The wake repeats the request.");
     await waitFor("the wake turn to end", () => idle(agent.id));
     assert.equal(turnTexts().length - before, 1, "One turn runs.");
+    const lines = wakeLines(agent.id);
+    assert.deepEqual(
+      lines.map((line) => [line.author, line.text]),
+      [["system", "The sign-in to Notes did not finish. The agent continues."]],
+      "The chat shows one line, not a message from the user.",
+    );
+    assert.ok(!chat(agent.id).some((message) => message.text.includes(NOTE)), "The prompt is not in the chat.");
+    const waits = current.service.listWaits(agent.id).waits;
+    assert.equal(waits.length, 1, "The wait stays open.");
+    assert.notEqual(waits[0]?.wokenAt, null, "The wait records the wake.");
     return { reason: outcome.error };
   });
 
-  await check("a sign-in that connects starts a turn that tests the server, and ends the watch", async () => {
-    accept = true;
-    const before = turnTexts().length;
-    const outcome = await signIn();
-    assert.equal(outcome.error, null, "The server answers.");
-    const text = await waitFor("the wake turn", () =>
-      turnTexts()
-        .slice(before)
-        .find((turn) => turn.includes(NOTE)),
-    );
-    assert.ok(text.includes('"Notes" is done. Call openbot.test_mcp_server with name "Notes"'), text);
-    await waitFor("the wake turn to end", () => idle(agent.id));
-    assert.equal(turnTexts().length - before, 1, "One turn runs.");
-    return { toolCount: outcome.toolCount };
-  });
+  await check(
+    "the wait survives a restart, and a sign-in that connects ends it, also behind a pending wake",
+    async () => {
+      await runCauseEffect(current.service.stop());
+      current.database.close();
+      current = openService();
+      await runCauseEffect(current.service.initialize());
+      assert.equal(current.service.listWaits(agent.id).waits.length, 1, "The wait is still open after the restart.");
+      const before = turnTexts().length;
+      // A failed sign-in and, at once, one that connects: the second wake must not wait for the first.
+      const failed = await signIn();
+      assert.notEqual(failed.error, null, "The first sign-in fails.");
+      accept = true;
+      const outcome = await signIn();
+      assert.equal(outcome.error, null, "The server answers.");
+      const text = await waitFor("the success wake turn", () =>
+        turnTexts()
+          .slice(before)
+          .find((turn) => turn.includes(NOTE) && turn.includes(SIGNED_IN)),
+      );
+      assert.ok(text.includes('"Notes" is done. Call openbot.test_mcp_server with name "Notes"'), text);
+      assert.ok(text.includes("This event ends the wait"), text);
+      assert.ok(text.includes("Test Notes."), "The wake repeats the original request.");
+      await waitFor("the wake turns to end", () => idle(agent.id));
+      assert.deepEqual(
+        turnTexts()
+          .slice(before)
+          .filter((turn) => turn.includes(NOTE))
+          .map((turn) => (turn.includes(SIGNED_IN) ? "done" : "failed")),
+        ["failed", "done"],
+        "Both wakes run, in order.",
+      );
+      assert.equal(current.service.listWaits(agent.id).waits.length, 0, "The wait is closed.");
+      assert.equal(wakeLines(agent.id).at(-1)?.text, "The sign-in to Notes is done. The agent continues.");
+      return { toolCount: outcome.toolCount };
+    },
+  );
 
-  await check("a sign-in that no card waits for starts no turn", async () => {
+  await check("a sign-in that no wait waits for starts no turn", async () => {
     const before = turnTexts().length;
     await signIn();
     // A wake would already be in the queue: the sign-in answers after it queues its wakes.
-    await runCauseEffect(service.sendMessage({ agentId: agent.id, text: "Next request." }));
+    await runCauseEffect(current.service.sendMessage({ agentId: agent.id, text: "Next request." }));
     await waitFor("the next request", () =>
       turnTexts()
         .slice(before)
@@ -337,8 +393,8 @@ try {
   report.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
   process.exitCode = 1;
 } finally {
-  await runCauseEffect(service.stop()).catch(() => {});
-  database.close();
+  await runCauseEffect(current.service.stop()).catch(() => {});
+  current.database.close();
   await new Promise<void>((done) => mcp.close(() => done()));
   mkdirSync(OUT, { recursive: true });
   writeFileSync(join(OUT, "report.json"), `${JSON.stringify(report, null, 2)}\n`);

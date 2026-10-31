@@ -1,8 +1,9 @@
 import { INPUT_LIMITS } from "./input-limits";
+import { AGENT_WAIT_SOURCES, type AgentWaitSource } from "./ipc-agent-waits";
 import { isBoundedString, isIdentifier } from "./ipc-bounded-values";
 import type { ConversationMessage } from "./ipc-conversation-messages";
 import type { RoutineRunStatus } from "./ipc-routines";
-import { isDynamicRecord, isString } from "./runtime-values";
+import { isDynamicRecord, isOneOf, isString } from "./runtime-values";
 
 export const ROUTINE_EVENT_ITEM_TYPE_PREFIX = "routine-event:";
 
@@ -369,6 +370,26 @@ export function isPlanContinuationMarker(message: ConversationMessage): boolean 
     message.status === "completed" &&
     message.itemType === PLAN_CONTINUATION_ITEM_TYPE
   );
+}
+
+/**
+ * The item type of the line that a wait woke the agent, `wait-wake:<source>`: the event of its source
+ * happened, and the agent continues the request. The text says what happened, as a
+ * `status.agent.waitWoke*` sentence.
+ */
+export const WAIT_WAKE_ITEM_TYPE_PREFIX = "wait-wake:";
+
+/** `source` is a string: a line that a newer build wrote keeps its source. */
+export function waitWakeItemType(source: string): string {
+  return `${WAIT_WAKE_ITEM_TYPE_PREFIX}${source}`;
+}
+
+/** The source of a wake line, or null for another message. */
+export function waitWakeSource(message: ConversationMessage): AgentWaitSource | null {
+  if (message.author !== "system" || message.source !== "system") return null;
+  if (!message.itemType?.startsWith(WAIT_WAKE_ITEM_TYPE_PREFIX)) return null;
+  const source = message.itemType.slice(WAIT_WAKE_ITEM_TYPE_PREFIX.length);
+  return isOneOf(AGENT_WAIT_SOURCES, source) ? source : null;
 }
 
 /**

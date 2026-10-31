@@ -17,6 +17,7 @@ import {
   ROUTINE_QUIET_ANSWER_ITEM_TYPE,
   ROUTINE_RUN_EVENT_ITEM_TYPE_PREFIX,
   SKILL_EVENT_ITEM_TYPE_PREFIX,
+  WAIT_WAKE_ITEM_TYPE_PREFIX,
 } from "@openbot/contracts/ipc";
 import { isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
@@ -291,6 +292,7 @@ export class ConversationReadStore {
       AND COALESCE(item_type, '') != 'subagents'
       AND COALESCE(item_type, '') != '${CONVERSATION_MEMORY_CHANGES_ITEM_TYPE}'
       AND COALESCE(item_type, '') != '${PLAN_CONTINUATION_ITEM_TYPE}'
+      AND COALESCE(item_type, '') NOT LIKE '${WAIT_WAKE_ITEM_TYPE_PREFIX}%'
       AND COALESCE(item_type, '') != '${ROUTINE_QUIET_ANSWER_ITEM_TYPE}'
       AND COALESCE(item_type, '') != 'agent_attachment'
       AND COALESCE(item_type, '') NOT LIKE '${CHAT_VISUAL_ITEM_TYPE_PREFIX}%'
@@ -397,6 +399,7 @@ function stateFromSnapshot(snapshot: ConversationSnapshot, throughMessageId: str
         message.itemType !== CONVERSATION_SUBAGENTS_ITEM_TYPE &&
         message.itemType !== CONVERSATION_MEMORY_CHANGES_ITEM_TYPE &&
         message.itemType !== PLAN_CONTINUATION_ITEM_TYPE &&
+        !message.itemType?.startsWith(WAIT_WAKE_ITEM_TYPE_PREFIX) &&
         message.itemType !== ROUTINE_QUIET_ANSWER_ITEM_TYPE &&
         message.itemType !== "agent_attachment" &&
         !message.itemType?.startsWith(CHAT_VISUAL_ITEM_TYPE_PREFIX) &&

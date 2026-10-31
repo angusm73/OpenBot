@@ -1,6 +1,6 @@
 import { sortConversationMessages } from "@openbot/contracts/conversation-order";
 import type { AgentProviderId, ConversationMessage, ConversationSnapshot } from "@openbot/contracts/ipc";
-import { isImageGenerationAspectRatio, ROUTINE_QUIET_ANSWER_ITEM_TYPE } from "@openbot/contracts/ipc";
+import { isImageGenerationAspectRatio, ROUTINE_QUIET_ANSWER_ITEM_TYPE, waitWakeItemType } from "@openbot/contracts/ipc";
 import { isString } from "@openbot/contracts/runtime-values";
 import { displayMessageReferences, type TeammatePrompt, teammatePrompts } from "./agent/delivery-content";
 import { imageGenerationFailure, isImageGenerationItem } from "./agent/image-generation";
@@ -142,11 +142,14 @@ function promptMessage(
   row: Pick<ConversationMessage, "id" | "turnId" | "text" | "createdAt">,
 ): ConversationMessage {
   const delivery = context?.delivery;
+  // The line of a wake, not the user's message: see `StoredMessage.wake`.
+  const wake = context?.wake;
   return {
     id: delivery?.id ?? row.id,
     turnId: row.turnId,
-    author: delivery?.sender.kind === "agent" ? "agent" : "user",
-    source: delivery?.sender.kind === "agent" ? "agent" : "user",
+    author: wake ? "system" : delivery?.sender.kind === "agent" ? "agent" : "user",
+    source: wake ? "system" : delivery?.sender.kind === "agent" ? "agent" : "user",
+    ...(wake ? { itemType: waitWakeItemType(wake.source) } : {}),
     senderAgentId: delivery?.sender.kind === "agent" ? delivery.sender.agentId : undefined,
     replyToMessageId: delivery?.replyToMessageId,
     attachments: delivery?.attachments,

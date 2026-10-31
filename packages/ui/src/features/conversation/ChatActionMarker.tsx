@@ -896,7 +896,8 @@ function markerLabel(
     marker.kind === "model-switch" ||
     marker.kind === "channel-change" ||
     marker.kind === "vault-change" ||
-    marker.kind === "plan-continuation"
+    marker.kind === "plan-continuation" ||
+    marker.kind === "wait-wake"
   )
     return sourceText(marker.text);
   if (marker.kind === "context-reset") return t("chat.marker.contextReset");
@@ -976,7 +977,8 @@ function markerAccessibleLabel(
     marker.kind === "model-switch" ||
     marker.kind === "channel-change" ||
     marker.kind === "vault-change" ||
-    marker.kind === "plan-continuation"
+    marker.kind === "plan-continuation" ||
+    marker.kind === "wait-wake"
   )
     return label;
   if (marker.kind === "skill-lifecycle") return t("chat.marker.accessible.named", { label, name: marker.skillName });

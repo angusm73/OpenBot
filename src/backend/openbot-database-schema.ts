@@ -487,6 +487,29 @@ const V43_THREAD_EVENT_TYPE_INDEX_SQL = `
     ON orchestration_events(aggregate_id, event_type, sequence) WHERE aggregate_type = 'thread';
 `;
 
+// Migration 48 records what can wake an open wait. Frozen with the migration. `source` is the kind of
+// event: 'routine' for every wait from before it; later 'mcp-sign-in', 'webhook' or 'github-pull-request'.
+// It has no CHECK, so a new source needs no migration; the write path validates it. `target` is the key
+// that the source finds the wait by, and is null for 'routine'. `conditions_json` is what the wait waits
+// for, set when it opens. `cursor_json` is what the agent was last told, such as the fingerprint or
+// watermarks of a polled source. `failures` counts the reads of the source that failed in a row. ADD
+// COLUMN puts the columns after `wake_delivery_id`, the last column of the table.
+const V48_AGENT_WAIT_SOURCE_COLUMNS_SQL = [
+  "source TEXT NOT NULL DEFAULT 'routine'",
+  "target TEXT",
+  "conditions_json TEXT",
+  "cursor_json TEXT",
+  "failures INTEGER NOT NULL DEFAULT 0",
+] as const;
+
+const V34_AGENT_WAITS_END_SQL = `    wake_delivery_id TEXT
+  );`;
+
+// A source finds its open waits by target.
+const V48_AGENT_WAIT_SOURCE_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS agent_waits_source_target ON agent_waits(source, target) WHERE target IS NOT NULL;
+`;
+
 const BASELINE_AGENT_ROUTINES_END_SQL = `    last_event_sequence INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS agent_routines_agent`;
@@ -593,7 +616,7 @@ const LATEST_SCHEMA_SQL =
   WEBHOOK_SCHEMA_SQL +
   ROUTINE_FLOW_SCHEMA_SQL +
   AGENT_MEMORY_SELECTION_SCHEMA_SQL +
-  AGENT_WAIT_SCHEMA_SQL +
+  substituteOnce(AGENT_WAIT_SCHEMA_SQL, V34_AGENT_WAITS_END_SQL, withAgentWaitSource(V34_AGENT_WAITS_END_SQL)) +
   MESSAGING_MEMORY_SCHEMA_SQL +
   ROUTINE_RESULT_SCHEMA_SQL +
   V40_THREAD_MESSAGE_ORDER_INDEX_SQL +
@@ -603,7 +626,8 @@ const LATEST_SCHEMA_SQL =
   MESSAGING_ALLOWED_ROLES_SCHEMA_SQL +
   BROWSER_PROFILE_SCHEMA_SQL +
   WORKFLOW_SCHEMA_SQL +
-  AGENT_THREAD_SCHEMA_SQL;
+  AGENT_THREAD_SCHEMA_SQL +
+  V48_AGENT_WAIT_SOURCE_INDEX_SQL;
 
 /** The end of the thread message table with the migration 40 columns before its PRIMARY KEY constraint. */
 function withThreadMessageOrderColumns(tableEnd: string): string {
@@ -626,6 +650,14 @@ function withRunAddedColumns(tableEnd: string): string {
   return tableEnd.replace(
     "last_event_sequence INTEGER NOT NULL,\n",
     `last_event_sequence INTEGER NOT NULL,\n${[...V33_ROUTINE_RUN_MISSED_COLUMNS_SQL, V35_ROUTINE_RUN_SOURCE_COLUMN_SQL].map((column) => `    ${column},\n`).join("")}`,
+  );
+}
+
+/** The end of the agent wait table with the migration 48 columns after its last one. */
+function withAgentWaitSource(tableEnd: string): string {
+  return tableEnd.replace(
+    "wake_delivery_id TEXT\n",
+    `wake_delivery_id TEXT,\n${V48_AGENT_WAIT_SOURCE_COLUMNS_SQL.map((column) => `    ${column}`).join(",\n")}\n`,
   );
 }
 
@@ -872,6 +904,12 @@ const MIGRATIONS: readonly OpenBotMigration[] = [
     // dropped table is a leaf, so no foreign-key pause; few rows, so no vacuum. Mailbox records keep their
     // task ids: the thread keeps the task id as `legacy_task_id`.
     up: (db) => db.exec(AGENT_THREAD_MIGRATION_SQL),
+  },
+  {
+    version: 48,
+    // Adds columns with a constant default or none and an index: no rebuild, so no foreign-key pause and no
+    // vacuum. Every existing wait gets the 'routine' source, so a routine run still wakes it, as before.
+    up: addAgentWaitSource,
   },
 ];
 
@@ -1251,6 +1289,18 @@ function addThreadMessageOrder(db: DatabaseSync): void {
   // The index is built once, after the keys, rather than updated row by row.
   db.exec(V40_THREAD_MESSAGE_ORDER_BACKFILL_SQL);
   db.exec(V40_THREAD_MESSAGE_ORDER_INDEX_SQL);
+}
+
+// Migration 48 adds the wake source columns to the agent waits and indexes them by target.
+function addAgentWaitSource(db: DatabaseSync): void {
+  // A development profile that ran this version before it shipped has the columns already.
+  const columns = db.prepare("PRAGMA table_info(agent_waits)").all();
+  for (const column of V48_AGENT_WAIT_SOURCE_COLUMNS_SQL) {
+    const name = column.slice(0, column.indexOf(" "));
+    if (columns.some((existing) => isDynamicRecord(existing) && existing.name === name)) continue;
+    db.exec(`ALTER TABLE agent_waits ADD COLUMN ${column}`);
+  }
+  db.exec(V48_AGENT_WAIT_SOURCE_INDEX_SQL);
 }
 
 // Migration 28 removes the provider CHECK. It rebuilds the table with no guard: every shipped table has the

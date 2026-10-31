@@ -5,8 +5,8 @@
  */
 
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import type { AgentWait } from "@openbot/contracts/ipc";
-import type { DynamicRecord } from "@openbot/contracts/runtime-values";
+import { AGENT_WAIT_SOURCES, type AgentWait, type AgentWaitSource } from "@openbot/contracts/ipc";
+import { type DynamicRecord, isDynamicRecord, isOneOf } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import {
   databaseRow,
@@ -35,6 +35,8 @@ export interface OpenAgentWaitInput {
   requestText: string;
   note: string;
   routineId: string | null;
+  /** Absent for a routine wait. */
+  source?: { source: Exclude<AgentWaitSource, "routine">; target: string; subject: string };
 }
 
 export class AgentWaitStore {
@@ -70,8 +72,9 @@ export class AgentWaitStore {
     const waitId = this.#createId();
     const inserted = this.#database.connection
       .prepare(
-        `INSERT INTO agent_waits (wait_id, agent_id, request_delivery_id, request_text, note, routine_id, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?
+        `INSERT INTO agent_waits
+           (wait_id, agent_id, request_delivery_id, request_text, note, routine_id, created_at, source, target, conditions_json)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE (SELECT COUNT(*) FROM agent_waits WHERE agent_id = ?) < ?`,
       )
       .run(
@@ -82,6 +85,9 @@ export class AgentWaitStore {
         input.note,
         input.routineId,
         this.#now().toISOString(),
+        input.source?.source ?? "routine",
+        input.source?.target ?? null,
+        input.source ? JSON.stringify({ subject: input.source.subject }) : null,
         input.agentId,
         INPUT_LIMITS.agentWaits,
       );
@@ -121,10 +127,20 @@ export class AgentWaitStore {
     return databaseRows(
       this.#database.connection
         .prepare(
-          `SELECT * FROM agent_waits WHERE agent_id = ? AND (routine_id IS NULL OR routine_id = ?)
+          `SELECT * FROM agent_waits WHERE agent_id = ? AND source = 'routine' AND (routine_id IS NULL OR routine_id = ?)
            ORDER BY created_at, wait_id`,
         )
         .all(agentId, routineId),
+    ).map(toWait);
+  }
+
+  /** The open waits of every agent that this source watches at this target. */
+  forSource(source: AgentWaitSource, target: string, agentId?: string): AgentWait[] {
+    const agent = agentId === undefined ? "" : " AND agent_id = ?";
+    return databaseRows(
+      this.#database.connection
+        .prepare(`SELECT * FROM agent_waits WHERE source = ? AND target = ?${agent} ORDER BY created_at, wait_id`)
+        .all(source, target, ...(agentId === undefined ? [] : [agentId])),
     ).map(toWait);
   }
 
@@ -153,6 +169,8 @@ function toWait(row: DynamicRecord): AgentWait {
     id: requiredStringColumn(row, "wait_id"),
     agentId: requiredStringColumn(row, "agent_id"),
     note: requiredStringColumn(row, "note"),
+    source: waitSource(requiredStringColumn(row, "source")),
+    subject: conditionsSubject(optionalStringColumn(row, "conditions_json")),
     requestMessageId: requiredStringColumn(row, "request_delivery_id"),
     requestText: requiredStringColumn(row, "request_text"),
     routineId: optionalStringColumn(row, "routine_id"),
@@ -160,4 +178,22 @@ function toWait(row: DynamicRecord): AgentWait {
     wokenAt: optionalStringColumn(row, "woken_at"),
     wakeDeliveryId: optionalStringColumn(row, "wake_delivery_id"),
   };
+}
+
+/**
+ * A source that a newer build wrote reads as a routine wait, so it lists and closes. Nothing wakes it
+ * here: `forRoutineRun` reads only the rows whose stored source is `routine`.
+ */
+function waitSource(value: string): AgentWaitSource {
+  return isOneOf(AGENT_WAIT_SOURCES, value) ? value : "routine";
+}
+
+function conditionsSubject(json: string | null): string | null {
+  if (json === null) return null;
+  try {
+    const parsed = JSON.parse(json);
+    return isDynamicRecord(parsed) && typeof parsed.subject === "string" ? parsed.subject : null;
+  } catch {
+    return null;
+  }
 }
