@@ -6,6 +6,8 @@ import { createSignal } from "solid-js";
 export interface McpSignInChatCardProps {
   config: McpServerConfig;
   signedIn: boolean;
+  /** The host sent the agent the end of a sign-in after this card. */
+  answered: boolean;
   onSignIn?: ((trigger: HTMLElement | null) => void) | undefined;
   /** Sends the message that tells the agent to test again. False when it could not be sent now. */
   onContinue: (body: string) => boolean;
@@ -13,13 +15,14 @@ export interface McpSignInChatCardProps {
 
 /**
  * An MCP server an agent saved that needs the user's sign-in. Sign in runs the sign-in of Server
- * settings, MCP; Continue tells the agent to test the server again.
+ * settings, MCP. The end of the sign-in wakes the agent; Continue tells it to test the server again
+ * when nothing did, such as after a restart.
  */
 export function McpSignInChatCard(props: McpSignInChatCardProps) {
   const { t } = useText();
   const [sent, setSent] = createSignal(false);
   const state = (): McpSignInCardState => {
-    if (sent()) return "sent";
+    if (sent() || (props.answered && props.signedIn)) return "sent";
     if (!props.onSignIn) return "unavailable";
     return props.signedIn ? "signed-in" : "sign-in";
   };

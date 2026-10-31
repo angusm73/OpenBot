@@ -1,5 +1,5 @@
 import { chatVisualReply } from "@openbot/contracts/chat-visual";
-import type { ConversationMessageSender, MessageReaction } from "@openbot/contracts/ipc";
+import { type ConversationMessageSender, MCP_SIGN_IN_WAKE_PREFIX, type MessageReaction } from "@openbot/contracts/ipc";
 import type { ConversationUiBlock } from "@openbot/contracts/ui-blocks";
 import { Button } from "@openbot/ui";
 import type { AgentMessage, ChatActionMarkerModel } from "@openbot/ui/data";
@@ -464,6 +464,22 @@ export function ConversationTimeline() {
     marker.kind === "mcp-sign-in"
       ? mcpServers().find((config) => config.id === marker.mcpServerId && config.transport === "http")
       : undefined;
+  /**
+   * The sign-in cards that the host already answered: when a sign-in ends, it sends the agent a
+   * message, so the card has no Continue to press.
+   */
+  const answeredSignInIds = createMemo(() => {
+    const answered = new Set<string>();
+    let waiting: string[] = [];
+    for (const message of timelineMessages()) {
+      if (message.actionMarker?.kind === "mcp-sign-in") waiting.push(message.id);
+      else if (message.author === "you" && message.body.startsWith(MCP_SIGN_IN_WAKE_PREFIX)) {
+        for (const id of waiting) answered.add(id);
+        waiting = [];
+      }
+    }
+    return answered;
+  });
   const virtualMessageRows = createMemo(() => messageVirtualizer.getVirtualItems());
   const rail = createChatScrollRail({
     rows: timelineMessages,
@@ -831,6 +847,7 @@ export function ConversationTimeline() {
                                           <McpSignInChatCard
                                             config={config()}
                                             signedIn={props.mcpSignedIn?.(config().id) ?? false}
+                                            answered={answeredSignInIds().has(message()?.id ?? "")}
                                             onSignIn={
                                               props.onOpenMcpSignIn
                                                 ? (trigger) => props.onOpenMcpSignIn?.(config().id, trigger)

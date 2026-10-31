@@ -38,6 +38,7 @@ import type { AgentTables } from "../agent-data/agent-tables";
 import type { AgentStore } from "../agent-store";
 import type { AgentTasks } from "../agent-tasks/agent-tasks";
 import type { AgentWaits } from "../agent-waits/agent-waits";
+import type { AgentWatches } from "../agent-watches/agent-watches";
 import { OPENBOT_BROWSER_NAMESPACE } from "../browser-tools";
 import type { ChannelService } from "../channel-service";
 import type { ProviderSession } from "../database/provider-sessions";
@@ -75,7 +76,13 @@ import { HistoryTools } from "./history-tools";
 import type { HostedSiteCoordinator } from "./hosted-site-coordinator";
 import { isHostedSiteMutationTool } from "./hosted-site-events";
 import type { MailboxSync } from "./mailbox-sync";
-import { type AgentMcpServers, handleMcpServerTool, isMcpServerTool, searchSignIns } from "./mcp-tools";
+import {
+  type AgentMcpServers,
+  handleMcpServerTool,
+  isMcpServerTool,
+  mcpSignInTarget,
+  searchSignIns,
+} from "./mcp-tools";
 import {
   agentAccountSetup,
   listModelsPayload,
@@ -200,6 +207,7 @@ export interface OpenBotToolRouterOptions {
   routines: RoutineScheduler;
   memories: AgentMemories;
   waits: AgentWaits;
+  watches: AgentWatches;
   tasks: AgentTasks;
   drain: DrainScheduler;
   tables: AgentTables | null;
@@ -241,6 +249,7 @@ export class OpenBotToolRouter {
   readonly #routines: RoutineScheduler;
   readonly #memories: AgentMemories;
   readonly #waits: AgentWaits;
+  readonly #watches: AgentWatches;
   readonly #tasks: AgentTasks;
   readonly #drain: DrainScheduler;
   readonly #tables: AgentTables | null;
@@ -275,6 +284,7 @@ export class OpenBotToolRouter {
     this.#routines = options.routines;
     this.#memories = options.memories;
     this.#waits = options.waits;
+    this.#watches = options.watches;
     this.#tasks = options.tasks;
     this.#drain = options.drain;
     this.#tables = options.tables;
@@ -1247,7 +1257,8 @@ export class OpenBotToolRouter {
             Effect.map((decision) => decision === "accept"),
             toToolOperationFailed,
           ),
-      requestSignIn: (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config)),
+      requestSignIn: (config) =>
+        toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config, true)),
     });
   });
 
@@ -1274,7 +1285,7 @@ export class OpenBotToolRouter {
     return yield* searchSignIns(
       servers,
       configs.filter(({ name }) => names.has(name)),
-      (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config)),
+      (config) => toolStep(() => this.#postMcpSignInCard(agentId, threadId, params.turnId, config, false)),
     ).pipe(
       Effect.catch((failure) => {
         logger.warn("A tool search could not test an MCP server.", {
@@ -1287,18 +1298,29 @@ export class OpenBotToolRouter {
 
   /**
    * The card that signs in to a saved http server. One for each server and turn: a search and a
-   * test in the same turn, or the same search sent twice, ask for the same sign-in.
+   * test in the same turn, or the same search sent twice, ask for the same sign-in. With `watch`, in
+   * the agent's own chat, the end of the sign-in starts its next turn; the answer says whether it
+   * does. A search does not watch: the user did not ask for that server.
    */
-  #postMcpSignInCard(agentId: string, threadId: string, turnId: string, config: McpServerConfig): void {
+  #postMcpSignInCard(
+    agentId: string,
+    threadId: string,
+    turnId: string,
+    config: McpServerConfig,
+    watch: boolean,
+  ): boolean {
     const itemType = mcpSignInItemType({ mcpServerId: config.id });
     const messages = this.#conversation.ensureSnapshot(agentId, threadId).messages;
-    if (messages.some((message) => message.turnId === turnId && message.itemType === itemType)) return;
-    this.#postSystemCard(agentId, threadId, turnId, {
-      itemType,
-      text: sourceText("status.agent.mcpSignInRequested", { name: config.name }),
-      eventType: "mcp.sign_in_requested",
-      detail: { mcpServerId: config.id },
-    });
+    if (!messages.some((message) => message.turnId === turnId && message.itemType === itemType))
+      this.#postSystemCard(agentId, threadId, turnId, {
+        itemType,
+        text: sourceText("status.agent.mcpSignInRequested", { name: config.name }),
+        eventType: "mcp.sign_in_requested",
+        detail: { mcpServerId: config.id },
+      });
+    if (!watch || this.#conversation.isExecutionThread(threadId)) return false;
+    this.#watches.watch({ agentId, source: "mcp-sign-in", target: mcpSignInTarget(config.url) });
+    return true;
   }
 
   /** Adds the note that an agent changed the Vault. `text` names the item, never a secret. */

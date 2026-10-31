@@ -2,6 +2,9 @@ import type { ConversationMessage } from "./ipc-conversation-messages";
 
 export const MCP_SIGN_IN_ITEM_TYPE_PREFIX = "mcp-sign-in:";
 
+/** How the message starts that the host sends an agent when a sign-in that it waits for ends. */
+export const MCP_SIGN_IN_WAKE_PREFIX = "OpenBot note: the sign-in to the MCP server";
+
 /** An MCP server an agent saved that waits for the user's sign-in. The person signs in from the card. */
 export interface McpSignInEvent {
   mcpServerId: string;
