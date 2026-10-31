@@ -863,7 +863,10 @@ Network traffic can also occur when:
   only to ask GitHub which repositories you can push to, and gets back short-lived installation
   tokens for those repositories. It does not store or log either token, and it gets no chats, files
   or commands. Agents reach the GitHub MCP server through a local server on `127.0.0.1`, which adds
-  the right token to each call;
+  the right token to each call. While an agent waits for news of a pull request (`openbot.await_event`
+  with `pullRequest`), OpenBot itself reads that pull request from `api.github.com` with that token
+  about every 2 minutes: its state, checks, comments and reviews. It sends GitHub only the
+  repository name and the pull request number, and stops when the wait ends;
 - an installed build checks GitHub Releases for updates;
 - OpenBot checks for new provider CLI releases when it starts, once an hour, and when you select
   `Check for updates`. It asks `api.github.com` for Codex, `registry.npmjs.org` for Claude,

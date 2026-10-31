@@ -144,6 +144,28 @@ export class AgentWaitStore {
     ).map(toWait);
   }
 
+  /** Every open wait of this source, of every agent, with its conditions and what its agent was last told. */
+  allForSource(source: AgentWaitSource) {
+    return databaseRows(
+      this.#database.connection
+        .prepare("SELECT * FROM agent_waits WHERE source = ? ORDER BY created_at, wait_id")
+        .all(source),
+    ).map((row) => ({
+      wait: toWait(row),
+      target: optionalStringColumn(row, "target"),
+      conditions: parseConditions(optionalStringColumn(row, "conditions_json")),
+      cursor: parseConditions(optionalStringColumn(row, "cursor_json")),
+      failures: requiredNumberColumn(row, "failures"),
+    }));
+  }
+
+  /** What a poll source last told the agent of this wait, and its failed reads in a row. */
+  setCursor(agentId: string, waitId: string, cursor: DynamicRecord | null, failures: number): void {
+    this.#database.connection
+      .prepare("UPDATE agent_waits SET cursor_json = ?, failures = ? WHERE agent_id = ? AND wait_id = ?")
+      .run(cursor === null ? null : JSON.stringify(cursor), failures, agentId, waitId);
+  }
+
   /** `forSource` with the conditions each wait opened with. */
   forSourceWithConditions(source: AgentWaitSource, target: string, agentId: string) {
     return databaseRows(
@@ -199,7 +221,7 @@ function waitSource(value: string): AgentWaitSource {
   return isOneOf(AGENT_WAIT_SOURCES, value) ? value : "routine";
 }
 
-/** A row that holds no readable conditions has none: one bad row must not break every list. */
+/** A row that holds no readable JSON object has none: one bad row must not break every list. */
 function parseConditions(json: string | null): DynamicRecord | null {
   if (json === null) return null;
   try {

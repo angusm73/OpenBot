@@ -109,6 +109,7 @@ export const messages = defineMessages("chat", {
   "chat.waits.woken": { one: "{count} not closed", other: "{count} not closed" },
   "chat.waits.source.mcpSignIn": "Sign-in to {name}",
   "chat.waits.source.webhook": "Webhook: {name}",
+  "chat.waits.source.pullRequest": "Pull request {name}",
   "chat.waits.state.waiting": "Waiting",
   "chat.waits.state.resuming": "Continuing the request",
   "chat.waits.state.woken": "Woke, not closed",

@@ -133,9 +133,11 @@ function OpenWaitList(props: OpenWaitsProps) {
                 <span class="open-waits-row-text">
                   <span class="open-waits-row-note">{title(item())}</span>
                   <span class="open-waits-row-meta">
-                    <Show when={item().source === "webhook"}>
+                    <Show when={item().source === "webhook" || item().source === "github-pull-request"}>
                       <span class="open-waits-row-source">
-                        {t("chat.waits.source.webhook", { name: item().subject ?? "" })}
+                        {item().source === "webhook"
+                          ? t("chat.waits.source.webhook", { name: item().subject ?? "" })
+                          : t("chat.waits.source.pullRequest", { name: item().subject ?? "" })}
                       </span>
                       <span aria-hidden="true">·</span>
                     </Show>

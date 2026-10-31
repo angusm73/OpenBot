@@ -1750,6 +1750,7 @@ export async function createApplicationServices({
     githubConnector: {
       mcpServer: () => githubConnector.mcpServer(),
       mcpAuthorization: () => githubConnector.mcpAuthorization().pipe(toMcpGatewayFailed),
+      accessToken: () => githubConnector.accessToken().pipe(toMcpGatewayFailed),
     },
     passwordVault: passwordVaultRouter([
       { prefix: "", vault: onePasswordConnector },

@@ -11,6 +11,12 @@ import type { DynamicToolCallParams } from "../protocol";
 import { webhookEventTypeZodSchema, webhookFiltersZodSchema } from "../routine-tool-schema";
 import { webhookMismatch } from "../webhook-trigger";
 import { AgentWaitError, AgentWaitLimitError, type AgentWaitStore } from "./agent-wait-store";
+import {
+  type PullRequestReader,
+  pullRequestSubject,
+  pullRequestTarget,
+  sweepPullRequestWaits,
+} from "./pull-request-waits";
 
 export const AWAIT_EVENT_TOOL = "await_event";
 export const CLOSE_WAIT_TOOL = "close_wait";
@@ -37,6 +43,19 @@ export const awaitEventToolSchema = z.strictObject({
     })
     .optional()
     .describe("Only a run with a matching event wakes the wait. Not with routineId."),
+  pullRequest: z
+    .strictObject({
+      repository: z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u)
+        .describe("owner/name"),
+      number: z.number().int().positive(),
+    })
+    .optional()
+    .describe(
+      "News wakes the wait: checks failed or passed, a comment by someone else, a conflict. Merged or closed ends it. OpenBot reads it every 2 minutes; do not poll.",
+    ),
 });
 
 export const closeWaitToolSchema = z.strictObject({
@@ -54,6 +73,8 @@ export interface AgentWaitsHooks {
   hasRoutine(agentId: string): boolean;
   /** The name of this agent's webhook routine, or null when it has no such routine. */
   webhookRoutineName(agentId: string, routineId: string): string | null;
+  /** Whether the GitHub connection is on, so the host can read pull requests. */
+  pullRequestsAvailable(): boolean;
   /** Throws when no local agent has this id. */
   requireKnownAgent(agentId: string): void;
   /** Queues the turn that a source event starts, as a line in the agent's own chat. Answers its delivery id. */
@@ -83,6 +104,8 @@ export interface AgentWaitEvent {
   text: string;
   /** The event ends the waits: no later event of the target is needed. */
   final: boolean;
+  /** Only these waits of the target, when the source tells each wait its own news. */
+  waitIds?: readonly string[];
 }
 
 export interface AgentWaitsOptions {
@@ -215,6 +238,7 @@ export class AgentWaits {
   readonly wake = Effect.fn("AgentWaits.wake")(function* (this: AgentWaits, event: AgentWaitEvent) {
     const waits = this.#store
       .forSource(event.source, event.target)
+      .filter((wait) => !event.waitIds || event.waitIds.includes(wait.id))
       .filter((wait) => event.final || !wait.wakeDeliveryId || !this.#isPending(wait.wakeDeliveryId));
     yield* Effect.forEach(waits, (wait) =>
       this.#hooks
@@ -265,7 +289,7 @@ export class AgentWaits {
           ? sourceText("error.backend.agentWaitNoteRequired")
           : z.prettifyError(parsed.error),
       );
-    const { note, routineId, webhook } = parsed.data;
+    const { note, routineId, webhook, pullRequest } = parsed.data;
     if (caller.inExecutionThread) return openBotToolFailure(sourceText("error.backend.agentWaitOwnChatOnly"));
     const deliveries = this.#mailbox.findDeliveriesByTurn(caller.agentId, params.turnId);
     // A run that continues waits keeps them: leaving a wait open waits for the next run again.
@@ -277,9 +301,14 @@ export class AgentWaits {
       });
     const request = this.#requestOf(caller.agentId, params.turnId);
     if (!request) return openBotToolFailure(sourceText("error.backend.agentWaitNoRequest"));
+    if (pullRequest && (routineId || webhook))
+      return openBotToolFailure(sourceText("error.backend.agentWaitOneSource"));
+    if (pullRequest && !this.#hooks.pullRequestsAvailable())
+      return openBotToolFailure(sourceText("error.backend.agentWaitGitHubDisconnected"));
     if (routineId && !this.#hooks.ownsRoutine(caller.agentId, routineId))
       return openBotToolFailure(sourceText("error.backend.agentWaitRoutineGone"));
-    if (!this.#hooks.hasRoutine(caller.agentId))
+    // A pull request wait needs no routine: the host's own sweep wakes it.
+    if (!pullRequest && !this.#hooks.hasRoutine(caller.agentId))
       return openBotToolFailure(sourceText("error.backend.agentWaitNoRoutine"));
     const webhookName = webhook ? this.#hooks.webhookRoutineName(caller.agentId, webhook.routineId) : null;
     if (webhook && (routineId || webhookName === null || !(webhook.filters ?? []).every(isEventFilter)))
@@ -292,6 +321,16 @@ export class AgentWaits {
         requestText: request.text,
         note,
         routineId: webhook?.routineId ?? routineId ?? null,
+        ...(pullRequest
+          ? {
+              source: {
+                source: "github-pull-request",
+                target: pullRequestTarget(pullRequest),
+                subject: pullRequestSubject(pullRequest),
+                conditions: { repository: pullRequest.repository, number: pullRequest.number },
+              },
+            }
+          : {}),
         ...(webhook && webhookName !== null
           ? {
               source: {
@@ -330,16 +369,20 @@ export class AgentWaits {
             nearLimit: `You are close to the limit of open waits. Call openbot.${LIST_WAITS_TOOL} and close the waits whose request is done.`,
           }
         : {}),
-      ...(wait.source === "webhook"
+      ...(wait.source === "github-pull-request"
         ? {
-            wakes: `The next event of webhook routine ${wait.routineId} that matches the event type and the filters wakes this wait. Other events of the routine still run it, without the wait.`,
+            wakes: `News of pull request ${wait.subject} wakes this wait: OpenBot reads it every 2 minutes. Merged or closed ends the wait.`,
           }
-        : {
-            wakes: wait.routineId
-              ? `The next run of routine ${wait.routineId} wakes this wait, or a script event that names it.`
-              : "The next run of any of your routines wakes this wait, or a script event that names it.",
-            scriptEvent: `A local script names the wait with "waitId": "${wait.id}" next to "payload" in the body of its routine run request.`,
-          }),
+        : wait.source === "webhook"
+          ? {
+              wakes: `The next event of webhook routine ${wait.routineId} that matches the event type and the filters wakes this wait. Other events of the routine still run it, without the wait.`,
+            }
+          : {
+              wakes: wait.routineId
+                ? `The next run of routine ${wait.routineId} wakes this wait, or a script event that names it.`
+                : "The next run of any of your routines wakes this wait, or a script event that names it.",
+              scriptEvent: `A local script names the wait with "waitId": "${wait.id}" next to "payload" in the body of its routine run request.`,
+            }),
       next: "End your turn now. The run that wakes the wait repeats the request and your note. Close the wait with openbot.close_wait when the request is done.",
     });
   }
@@ -387,6 +430,22 @@ export class AgentWaits {
       throw new AgentWaitError(error instanceof Error ? error.message : String(error));
     }
     return agentId;
+  }
+
+  /** One sweep of the `github-pull-request` waits with this reader. The owner runs it on a timer. */
+  sweepPullRequests(reader: PullRequestReader) {
+    return sweepPullRequestWaits({
+      waits: () => this.#store.allForSource("github-pull-request"),
+      setCursor: (wait, cursor, failures) => this.#store.setCursor(wait.agentId, wait.id, cursor, failures),
+      wakePending: (wait) => this.wakePending(wait),
+      wake: (event) => this.wake(event),
+      reader,
+    });
+  }
+
+  /** True while the turn of the wait's last wake is queued or runs. */
+  wakePending(wait: AgentWait): boolean {
+    return wait.wakeDeliveryId !== null && this.#isPending(wait.wakeDeliveryId);
   }
 
   #isPending(deliveryId: string): boolean {

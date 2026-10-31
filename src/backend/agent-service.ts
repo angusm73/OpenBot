@@ -225,6 +225,11 @@ import { AgentTasks } from "./agent-tasks/agent-tasks";
 import { type AgentThreadRecord, AgentThreadStore } from "./agent-threads/agent-thread-store";
 import { AgentWaitStore } from "./agent-waits/agent-wait-store";
 import { AgentWaits, type AgentWake } from "./agent-waits/agent-waits";
+import {
+  gitHubPullRequestReader,
+  PULL_REQUEST_SWEEP_MS,
+  type PullRequestReader,
+} from "./agent-waits/pull-request-waits";
 import { automationRunCommand } from "./automation-command";
 import { toChannelOperationError } from "./channel-effects";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
@@ -388,6 +393,8 @@ export interface AgentServiceOptions {
    * for the same reason as `computerUseMcpServer`: the user connects and disconnects while OpenBot runs.
    */
   githubConnector?: GitHubConnectorSource | null;
+  /** The GitHub API and the sweep interval of pull request waits. Tests point them at a fake. */
+  pullRequestWaits?: { apiUrl?: string; sweepMs?: number };
   /** The 1Password vault the user shared with OpenBot, or `null`. The browser fills logins from it. */
   passwordVault?: PasswordVault | null;
   /** The cards and contact info of the Vault, or `null`. The browser fills cards from it. */
@@ -438,6 +445,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #memories: AgentMemories;
   readonly #memoryReview: MemoryReview;
   readonly #waits: AgentWaits;
+  readonly #pullRequestReader: PullRequestReader;
+  readonly #pullRequestSweepMs: number;
+  #pullRequestTimer: ReturnType<typeof setInterval> | null = null;
+  #pullRequestSweep: Fiber.Fiber<unknown, unknown> | null = null;
   readonly #tasks: AgentTasks;
   readonly #tables: AgentTables | null;
   readonly #routines: RoutineScheduler;
@@ -639,6 +650,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         emit: (event) => this.#emit(event),
         ownsRoutine: (agentId, routineId) => this.#routines.getRecord(agentId, routineId) !== null,
         hasRoutine: (agentId) => this.#routines.listRecordsFor(agentId).length > 0,
+        pullRequestsAvailable: () => githubConnector?.mcpServer() != null,
         webhookRoutineName: (agentId, routineId) => {
           const routine = this.#routines.getRecord(agentId, routineId);
           return routine?.trigger.kind === "webhook" ? routine.name : null;
@@ -658,6 +670,11 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         reportError: (cause, agentId) => this.#emitError("agent_wait_wake_failed", cause, agentId),
       },
     });
+    this.#pullRequestReader = gitHubPullRequestReader({
+      token: () => githubConnector?.accessToken() ?? Effect.succeed(null),
+      ...(options.pullRequestWaits?.apiUrl ? { apiUrl: options.pullRequestWaits.apiUrl } : {}),
+    });
+    this.#pullRequestSweepMs = options.pullRequestWaits?.sweepMs ?? PULL_REQUEST_SWEEP_MS;
     this.#routines = new RoutineScheduler({
       timer: this.#routineTimer,
       waits: this.#waits,
@@ -3541,8 +3558,31 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     yield* lifecycleStep("arm routines", () => {
       this.#channelRoutines.reconcileAll();
       this.#routineTimer.arm();
+      this.#armPullRequestSweep();
     });
   }).bind(this);
+
+  /**
+   * Reads the watched pull requests on a timer, one sweep at a time, in the service scope that `stop`
+   * closes. A sweep with no pull request wait reads nothing.
+   */
+  #armPullRequestSweep(): void {
+    if (this.#pullRequestTimer) return;
+    this.#pullRequestTimer = setInterval(() => {
+      if (this.#pullRequestSweep || this.#stopping) return;
+      this.#pullRequestSweep = Effect.runFork(
+        this.#waits.sweepPullRequests(this.#pullRequestReader).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.sync(() => this.#emitError("pull_request_sweep_failed", Cause.squash(cause))),
+          ),
+          Effect.ensuring(Effect.sync(() => (this.#pullRequestSweep = null))),
+        ),
+      );
+    }, this.#pullRequestSweepMs);
+    this.#pullRequestTimer.unref?.();
+  }
 
   setPreferredProvider(
     provider: AgentProvider,
@@ -4052,6 +4092,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     );
     this.#initialized = false;
     this.#routineTimer.dispose();
+    if (this.#pullRequestTimer) clearInterval(this.#pullRequestTimer);
+    this.#pullRequestTimer = null;
+    // A sweep that runs on would wake agents while their providers stop.
+    if (this.#pullRequestSweep) yield* Fiber.interrupt(this.#pullRequestSweep);
     yield* this.#memoryHold.dispose();
     this.#hostedSites.dispose();
     this.#compaction.dispose();
