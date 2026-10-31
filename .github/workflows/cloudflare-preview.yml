@@ -21,7 +21,9 @@ jobs:
   # the upload of a valid run.
   source:
     name: Find the pull request build
+    # Only the upstream repository has the Cloudflare preview token.
     if: >-
+      github.repository == 'nightly-labs/openbot' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.conclusion != 'cancelled'

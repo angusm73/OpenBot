@@ -65,7 +65,9 @@ jobs:
     # GitHub is the pre-filter instead — applying a label already requires triage or above,
     # which is a narrower gate than any association, and the lookup below is what turns that
     # into the permission to merge.
+    # Only the upstream repository has the self-hosted reviewer and its secrets.
     if: >
+      github.repository == 'nightly-labs/openbot' && (
       (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.draft == false) ||
@@ -74,7 +76,7 @@ jobs:
         contains(github.event.comment.body, '/norbiai review') &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
       (github.event_name == 'pull_request_target' &&
-        github.event.label.name == 'norbiai')
+        github.event.label.name == 'norbiai'))
 
     permissions:
       contents: read
