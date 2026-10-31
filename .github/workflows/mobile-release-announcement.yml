@@ -26,7 +26,8 @@ concurrency:
 jobs:
   detect:
     name: Find the version that both stores have now
-    if: github.ref == 'refs/heads/main'
+    # Only the upstream repository announces store releases.
+    if: github.repository == 'nightly-labs/openbot' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

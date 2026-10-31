@@ -29,10 +29,12 @@ jobs:
     name: Apply contribution policy
     # A new `approved` label sweeps at once, so a pull request that links the issue passes without
     # waiting for the daily run. Other issue labels do nothing.
+    # The policy reads the upstream issues and their `approved` label.
     if: >-
+      github.repository == 'nightly-labs/openbot' && (
       github.event_name != 'issues' ||
       github.event.action == 'opened' ||
-      github.event.label.name == 'approved'
+      github.event.label.name == 'approved')
     # On the job, not the workflow: a run that the `if` skips, such as the `bug` label that a new
     # issue gets, must not take the group and cancel the pending `opened` run. An `approved` label
     # runs the sweep, so it shares the group of the daily sweep.
