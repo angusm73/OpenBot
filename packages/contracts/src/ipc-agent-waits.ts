@@ -5,8 +5,9 @@ import { isDynamicRecord, isOneOf } from "./runtime-values";
 /**
  * What can wake a wait. `routine`: a routine run of the agent, or a script event that names the wait.
  * `mcp-sign-in`: the end of the sign-in that a Sign in card in the agent's chat asks for.
+ * `webhook`: a run of one webhook routine whose event matches the wait's event type and filters.
  */
-export const AGENT_WAIT_SOURCES = ["routine", "mcp-sign-in"] as const;
+export const AGENT_WAIT_SOURCES = ["routine", "mcp-sign-in", "webhook"] as const;
 export type AgentWaitSource = (typeof AGENT_WAIT_SOURCES)[number];
 
 /**

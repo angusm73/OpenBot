@@ -639,6 +639,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         emit: (event) => this.#emit(event),
         ownsRoutine: (agentId, routineId) => this.#routines.getRecord(agentId, routineId) !== null,
         hasRoutine: (agentId) => this.#routines.listRecordsFor(agentId).length > 0,
+        webhookRoutineName: (agentId, routineId) => {
+          const routine = this.#routines.getRecord(agentId, routineId);
+          return routine?.trigger.kind === "webhook" ? routine.name : null;
+        },
         requireKnownAgent: (agentId) => {
           this.#conversation.requireKnownAgent(agentId);
         },

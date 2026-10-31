@@ -4,8 +4,9 @@
 // result that it gets. The relay is a fake that gives a URL, or fails while it is "down".
 // The check asserts that the result has the URL and the request format and no signing secret, that
 // the chat records the creation for the card, that the routine lists with the webhook routines, that
-// a duplicate name and a bad filter come back as tool failures, and that a request signed with the
-// secret the card makes starts the routine.
+// a duplicate name and a bad filter come back as tool failures, that a request signed with the
+// secret the card makes starts the routine, and that a webhook wait (`await_event` with `webhook`)
+// wakes only for an event that matches its filters.
 // `bun scripts/agent-webhook-routine-e2e.ts`. Writes .openbot-build/agent-webhook-routine-e2e/report.json.
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
@@ -155,12 +156,14 @@ interface ToolLog {
 /** The arguments the fake passes to the tool. */
 /** The arguments the fake passes to the tool that `__tool` names (default `create_webhook_routine`). */
 interface WebhookToolArgs {
-  __tool?: "create_webhook_routine" | "update_webhook_routine" | "list_routines";
+  __tool?: "create_webhook_routine" | "update_webhook_routine" | "list_routines" | "await_event";
   routineId?: string;
   name?: string;
   instruction?: string;
   eventType?: string;
   filters?: { pointer: string; value: string }[];
+  note?: string;
+  webhook?: { routineId: string; eventType?: string; filters?: { pointer: string; value: string | number }[] };
 }
 
 /** The fields of a tool result that the check reads. The router sends them as JSON text. */
@@ -174,6 +177,8 @@ interface WebhookToolBody {
   urlPending?: string;
   secret?: string;
   request?: { headers: Record<string, string> };
+  waitId?: string;
+  wakes?: string;
 }
 
 const report: {
@@ -416,8 +421,9 @@ try {
   // 6. The card makes the secret; a request signed with it starts the routine.
   const { secret } = await Effect.runPromise(events.rotateSecret({ owner, id: result.routineId }));
   const routeId = new URL(result.url ?? "").pathname.split("/").at(-1) ?? "";
-  const body = new TextEncoder().encode(JSON.stringify({ type: "build.failed", data: { branch: "main" } }));
-  const deliver = (key: string) => {
+  const encode = (data: Record<string, string | number>) =>
+    new TextEncoder().encode(JSON.stringify({ type: "build.failed", data }));
+  const deliver = (key: string, body = encode({ branch: "main" })) => {
     const timestamp = String(Math.floor(Date.now() / 1000));
     const deliveryId = randomUUID();
     const signature = `sha256=${createHmac("sha256", key).update(`${timestamp}.${deliveryId}.`).update(body).digest("hex")}`;
@@ -473,6 +479,50 @@ try {
   pass(
     "The same secret still signs, and a request outside the new filter is ignored",
     outside.status === 202 && latest[0]?.status === "ignored" && latest[0]?.reason === "filter",
+  );
+
+  // 8. A webhook wait: only an event that matches its filters wakes it. Other events still run.
+  const badWait = await callTool("webhook wait for an unknown routine", agent.id, {
+    __tool: "await_event",
+    note: "Never.",
+    webhook: { routineId: "no-such-routine" },
+  });
+  pass(
+    "A webhook wait needs a webhook routine of the agent",
+    badWait.entry.result?.success === false && badWait.text.includes("webhook routines"),
+    badWait.text,
+  );
+  const opened = await callTool("webhook wait", agent.id, {
+    __tool: "await_event",
+    note: "The failed build of pull request 12, then name the failed test.",
+    webhook: { routineId: result.routineId, eventType: "build.failed", filters: [{ pointer: "/pr", value: 12 }] },
+  });
+  const waitOf = () => agents.listWaits(agent.id).waits.find((wait) => wait.id === opened.body?.waitId);
+  pass(
+    "The webhook wait opens with the routine as its subject",
+    opened.entry.result?.success === true &&
+      waitOf()?.source === "webhook" &&
+      waitOf()?.subject === "Failed builds" &&
+      opened.body?.wakes?.includes("matches the event type and the filters") === true,
+    opened.text,
+  );
+  const runsBefore = (await Effect.runPromise(events.listActivity({ owner, routineId: result.routineId }))).filter(
+    (item) => item.status === "started",
+  ).length;
+  const other = await deliver(secret, encode({ branch: "release", pr: 11 }));
+  const afterOther = (await Effect.runPromise(events.listActivity({ owner, routineId: result.routineId }))).filter(
+    (item) => item.status === "started",
+  ).length;
+  pass(
+    "An event of another pull request runs the routine and leaves the wait asleep",
+    other.status === 202 && afterOther === runsBefore + 1 && waitOf()?.wokenAt === null,
+  );
+  const matching = await deliver(secret, encode({ branch: "release", pr: 12 }));
+  const woken = await waitFor("the wait to wake", () => waitOf()?.wakeDeliveryId);
+  const wakeRun = mailbox.getDelivery(woken)?.delivery;
+  pass(
+    "The matching event wakes the wait in its routine run",
+    matching.status === 202 && wakeRun?.sender.kind === "routine" && wakeRun.sender.routineId === result.routineId,
   );
   report.passed = true;
 } catch (error) {

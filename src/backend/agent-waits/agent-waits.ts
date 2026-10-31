@@ -1,11 +1,15 @@
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import type { AgentEvent, AgentWait, AgentWaitSource, AgentWaitsSnapshot } from "@openbot/contracts/ipc";
+import { type EventFilter, type EventJsonValue, isEventFilter } from "@openbot/contracts/ipc-events";
+import type { DynamicRecord } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { Cause, Effect } from "effect";
 import { z } from "zod";
 import { type OpenBotToolResponse, openBotToolFailure, openBotToolResult } from "../agent/routine-tools";
 import type { MailboxStore } from "../mailbox-store";
 import type { DynamicToolCallParams } from "../protocol";
+import { webhookEventTypeZodSchema, webhookFiltersZodSchema } from "../routine-tool-schema";
+import { webhookMismatch } from "../webhook-trigger";
 import { AgentWaitError, AgentWaitLimitError, type AgentWaitStore } from "./agent-wait-store";
 
 export const AWAIT_EVENT_TOOL = "await_event";
@@ -25,6 +29,14 @@ const waitOwnerSchema = z
 export const awaitEventToolSchema = z.strictObject({
   note: z.string().trim().min(1).max(INPUT_LIMITS.agentWaitNote),
   routineId: z.string().trim().min(1).max(INPUT_LIMITS.identifier).optional(),
+  webhook: z
+    .strictObject({
+      routineId: z.string().trim().min(1).max(INPUT_LIMITS.identifier).describe("One of your webhook routines."),
+      eventType: webhookEventTypeZodSchema.optional().describe('The event "type".'),
+      filters: webhookFiltersZodSchema.optional().describe("Every filter must match."),
+    })
+    .optional()
+    .describe("Only a run with a matching event wakes the wait. Not with routineId."),
 });
 
 export const closeWaitToolSchema = z.strictObject({
@@ -40,6 +52,8 @@ export interface AgentWaitsHooks {
   ownsRoutine(agentId: string, routineId: string): boolean;
   /** Whether this agent has a routine: only a routine run wakes a wait. */
   hasRoutine(agentId: string): boolean;
+  /** The name of this agent's webhook routine, or null when it has no such routine. */
+  webhookRoutineName(agentId: string, routineId: string): string | null;
   /** Throws when no local agent has this id. */
   requireKnownAgent(agentId: string): void;
   /** Queues the turn that a source event starts, as a line in the agent's own chat. Answers its delivery id. */
@@ -117,14 +131,30 @@ export class AgentWaits {
 
   /**
    * Marks the waits that a routine run wakes, after its delivery is queued. A script event that
-   * names a wait wakes only that wait. Any other run wakes every wait of its agent that has no
-   * routine or has this routine. A wait whose last wake has not ended yet stays with that run.
+   * names a wait wakes only that wait. Any other run wakes every routine wait of its agent that has
+   * no routine or has this routine. A webhook run with its `event` also wakes the webhook waits of
+   * its routine whose conditions match it. A wait whose last wake has not ended yet stays with that run.
    */
-  wakeForRun(run: { agentId: string; routineId: string }, deliveryId: string, waitId: string | null): void {
+  wakeForRun(
+    run: { agentId: string; routineId: string },
+    deliveryId: string,
+    waitId: string | null,
+    event: { type: string; data: EventJsonValue } | null = null,
+  ): void {
     // A script event names only a wait that a routine run wakes.
     const named = waitId ? this.#store.get(run.agentId, waitId) : null;
     if (named && named.source !== "routine") return;
-    const candidates = waitId ? (named ? [named] : []) : this.#store.forRoutineRun(run.agentId, run.routineId);
+    const webhookWaits = event
+      ? this.#store
+          .forSourceWithConditions("webhook", run.routineId, run.agentId)
+          .filter(({ conditions }) => webhookMismatch(webhookConditions(conditions), event) === null)
+          .map(({ wait }) => wait)
+      : [];
+    const candidates = waitId
+      ? named
+        ? [named]
+        : []
+      : [...this.#store.forRoutineRun(run.agentId, run.routineId), ...webhookWaits];
     const woken = candidates
       .filter((wait) => !wait.wakeDeliveryId || !this.#isPending(wait.wakeDeliveryId))
       .map((wait) => wait.id);
@@ -229,8 +259,13 @@ export class AgentWaits {
 
   #awaitEvent(params: DynamicToolCallParams, caller: AgentWaitCaller): OpenBotToolResponse {
     const parsed = awaitEventToolSchema.safeParse(params.arguments);
-    if (!parsed.success) return openBotToolFailure(sourceText("error.backend.agentWaitNoteRequired"));
-    const { note, routineId } = parsed.data;
+    if (!parsed.success)
+      return openBotToolFailure(
+        parsed.error.issues.some((issue) => issue.path[0] === "note")
+          ? sourceText("error.backend.agentWaitNoteRequired")
+          : z.prettifyError(parsed.error),
+      );
+    const { note, routineId, webhook } = parsed.data;
     if (caller.inExecutionThread) return openBotToolFailure(sourceText("error.backend.agentWaitOwnChatOnly"));
     const deliveries = this.#mailbox.findDeliveriesByTurn(caller.agentId, params.turnId);
     // A run that continues waits keeps them: leaving a wait open waits for the next run again.
@@ -246,6 +281,9 @@ export class AgentWaits {
       return openBotToolFailure(sourceText("error.backend.agentWaitRoutineGone"));
     if (!this.#hooks.hasRoutine(caller.agentId))
       return openBotToolFailure(sourceText("error.backend.agentWaitNoRoutine"));
+    const webhookName = webhook ? this.#hooks.webhookRoutineName(caller.agentId, webhook.routineId) : null;
+    if (webhook && (routineId || webhookName === null || !(webhook.filters ?? []).every(isEventFilter)))
+      return openBotToolFailure(sourceText("error.backend.agentWaitWebhookInvalid"));
     let wait: AgentWait;
     try {
       wait = this.#store.open({
@@ -253,7 +291,17 @@ export class AgentWaits {
         requestMessageId: request.id,
         requestText: request.text,
         note,
-        routineId: routineId ?? null,
+        routineId: webhook?.routineId ?? routineId ?? null,
+        ...(webhook && webhookName !== null
+          ? {
+              source: {
+                source: "webhook",
+                target: webhook.routineId,
+                subject: webhookName,
+                conditions: { eventType: webhook.eventType?.trim() || null, filters: webhook.filters ?? [] },
+              },
+            }
+          : {}),
       });
     } catch (error) {
       if (!(error instanceof AgentWaitLimitError)) throw error;
@@ -282,10 +330,16 @@ export class AgentWaits {
             nearLimit: `You are close to the limit of open waits. Call openbot.${LIST_WAITS_TOOL} and close the waits whose request is done.`,
           }
         : {}),
-      wakes: wait.routineId
-        ? `The next run of routine ${wait.routineId} wakes this wait, or a script event that names it.`
-        : "The next run of any of your routines wakes this wait, or a script event that names it.",
-      scriptEvent: `A local script names the wait with "waitId": "${wait.id}" next to "payload" in the body of its routine run request.`,
+      ...(wait.source === "webhook"
+        ? {
+            wakes: `The next event of webhook routine ${wait.routineId} that matches the event type and the filters wakes this wait. Other events of the routine still run it, without the wait.`,
+          }
+        : {
+            wakes: wait.routineId
+              ? `The next run of routine ${wait.routineId} wakes this wait, or a script event that names it.`
+              : "The next run of any of your routines wakes this wait, or a script event that names it.",
+            scriptEvent: `A local script names the wait with "waitId": "${wait.id}" next to "payload" in the body of its routine run request.`,
+          }),
       next: "End your turn now. The run that wakes the wait repeats the request and your note. Close the wait with openbot.close_wait when the request is done.",
     });
   }
@@ -393,4 +447,11 @@ function wakePromptText(wait: AgentWait, event: AgentWaitEvent): string {
       ? "This event ends the wait: OpenBot closed it."
       : `The wait stays open, and the next event of its source wakes you again. Call openbot.${CLOSE_WAIT_TOOL} with its wait id when the request is done or no longer needed.`,
   ].join("\n");
+}
+
+/** The trigger fields that a webhook wait opened with. */
+function webhookConditions(conditions: DynamicRecord | null): { eventType: string | null; filters: EventFilter[] } {
+  const eventType = typeof conditions?.eventType === "string" ? conditions.eventType : null;
+  const filters = Array.isArray(conditions?.filters) ? conditions.filters.filter(isEventFilter) : [];
+  return { eventType, filters };
 }

@@ -133,6 +133,12 @@ function OpenWaitList(props: OpenWaitsProps) {
                 <span class="open-waits-row-text">
                   <span class="open-waits-row-note">{title(item())}</span>
                   <span class="open-waits-row-meta">
+                    <Show when={item().source === "webhook"}>
+                      <span class="open-waits-row-source">
+                        {t("chat.waits.source.webhook", { name: item().subject ?? "" })}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                    </Show>
                     <span class="open-waits-row-state">{t(STATE_LABEL[item().state])}</span>
                     <span aria-hidden="true">·</span>
                     <span>{openedAt(item().openedAt)}</span>

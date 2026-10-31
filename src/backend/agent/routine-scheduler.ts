@@ -19,7 +19,7 @@ import type {
   UpdateRoutineInput,
 } from "@openbot/contracts/ipc";
 import { routineConversationEventItemType, routineRunConversationEventItemType } from "@openbot/contracts/ipc";
-import type { EventRoutine } from "@openbot/contracts/ipc-events";
+import type { EventJsonValue, EventRoutine } from "@openbot/contracts/ipc-events";
 import { type DynamicRecord, isBoolean } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { collapseMissedOccurrences, RoutineInputError } from "@openbot/team-client/routine-schedule";
@@ -382,7 +382,7 @@ export class RoutineScheduler implements RoutineDueSource {
     if (!this.mayDrain(agentId)) return { kind: "unavailable" } as const;
     const result = yield* routineStep(() => this.#routines.receiveWebhook(agentId, routineId, event));
     if (result.kind === "started") {
-      yield* this.#enqueueRunEffect(result.run).pipe(
+      yield* this.#enqueueRunEffect(result.run, null, { type: event.eventType, data: event.data }).pipe(
         Effect.catch((failure) =>
           Effect.sync(() => this.#hooks.emitError("routine_delivery_failed", failure.cause, agentId)),
         ),
@@ -985,11 +985,15 @@ export class RoutineScheduler implements RoutineDueSource {
     return deliveryId;
   }, Effect.uninterruptible);
 
-  /** `waitId` is the one open wait a script event names; null wakes every wait the run matches. */
+  /**
+   * `waitId` is the one open wait a script event names; null wakes every wait the run matches.
+   * `event` is the webhook event of the run, which its routine's webhook waits match against.
+   */
   readonly #enqueueRunEffect = Effect.fn("RoutineScheduler.enqueueRun")(function* (
     this: RoutineScheduler,
     run: RoutineRun,
     waitId: string | null = null,
+    event: { type: string; data: EventJsonValue } | null = null,
   ) {
     // A test or a script run that arrives while a spent plan holds the agent would wait for the
     // reset, and a routine set to skip has no use for a late result.
@@ -1040,7 +1044,7 @@ export class RoutineScheduler implements RoutineDueSource {
           throw error;
         }
       });
-      yield* routineStep(() => this.#waits.wakeForRun(run, deliveryId, waitId));
+      yield* routineStep(() => this.#waits.wakeForRun(run, deliveryId, waitId, event));
       const snapshot = yield* routineStep(() => {
         const current = this.#conversation.ensureSnapshot(agent.id, agent.threadId);
         this.#hooks.syncMailboxMessages(current);

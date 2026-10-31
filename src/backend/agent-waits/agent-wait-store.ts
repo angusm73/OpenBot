@@ -35,8 +35,8 @@ export interface OpenAgentWaitInput {
   requestText: string;
   note: string;
   routineId: string | null;
-  /** Absent for a routine wait. */
-  source?: { source: Exclude<AgentWaitSource, "routine">; target: string; subject: string };
+  /** Absent for a routine wait. `conditions` is what the source matches its events against. */
+  source?: { source: Exclude<AgentWaitSource, "routine">; target: string; subject: string; conditions?: DynamicRecord };
 }
 
 export class AgentWaitStore {
@@ -87,7 +87,7 @@ export class AgentWaitStore {
         this.#now().toISOString(),
         input.source?.source ?? "routine",
         input.source?.target ?? null,
-        input.source ? JSON.stringify({ subject: input.source.subject }) : null,
+        input.source ? JSON.stringify({ ...input.source.conditions, subject: input.source.subject }) : null,
         input.agentId,
         INPUT_LIMITS.agentWaits,
       );
@@ -144,6 +144,17 @@ export class AgentWaitStore {
     ).map(toWait);
   }
 
+  /** `forSource` with the conditions each wait opened with. */
+  forSourceWithConditions(source: AgentWaitSource, target: string, agentId: string) {
+    return databaseRows(
+      this.#database.connection
+        .prepare(
+          "SELECT * FROM agent_waits WHERE source = ? AND target = ? AND agent_id = ? ORDER BY created_at, wait_id",
+        )
+        .all(source, target, agentId),
+    ).map((row) => ({ wait: toWait(row), conditions: parseConditions(optionalStringColumn(row, "conditions_json")) }));
+  }
+
   markWoken(agentId: string, waitIds: readonly string[], deliveryId: string): void {
     if (waitIds.length === 0) return;
     this.#database.connection
@@ -170,7 +181,7 @@ function toWait(row: DynamicRecord): AgentWait {
     agentId: requiredStringColumn(row, "agent_id"),
     note: requiredStringColumn(row, "note"),
     source: waitSource(requiredStringColumn(row, "source")),
-    subject: conditionsSubject(optionalStringColumn(row, "conditions_json")),
+    subject: conditionsSubject(parseConditions(optionalStringColumn(row, "conditions_json"))),
     requestMessageId: requiredStringColumn(row, "request_delivery_id"),
     requestText: requiredStringColumn(row, "request_text"),
     routineId: optionalStringColumn(row, "routine_id"),
@@ -188,12 +199,17 @@ function waitSource(value: string): AgentWaitSource {
   return isOneOf(AGENT_WAIT_SOURCES, value) ? value : "routine";
 }
 
-function conditionsSubject(json: string | null): string | null {
+/** A row that holds no readable conditions has none: one bad row must not break every list. */
+function parseConditions(json: string | null): DynamicRecord | null {
   if (json === null) return null;
   try {
     const parsed = JSON.parse(json);
-    return isDynamicRecord(parsed) && typeof parsed.subject === "string" ? parsed.subject : null;
+    return isDynamicRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
+}
+
+function conditionsSubject(conditions: DynamicRecord | null): string | null {
+  return typeof conditions?.subject === "string" ? conditions.subject : null;
 }

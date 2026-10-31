@@ -133,6 +133,15 @@ A `202` response does not mean that the run is complete. Look at the routine his
 result. The relay does not keep requests while the host is offline. If you do not retry, the event
 is lost.
 
+### Wait for one event
+
+An agent can stop a request and wait for one event of a webhook routine. It calls
+`openbot.await_event` with `webhook`: the routine ID, and an event type and filters in the format of
+the routine filters, such as `[{ "pointer": "/pr", "value": 12 }]`. Every request that the routine
+accepts still starts a run. Only a run whose event also matches the wait continues the request, with
+the request and the agent's note. The wait stays open until the agent closes it or you cancel it
+above the message box.
+
 ### Retries and duplicates
 
 The delivery ID is the deduplication key for each routine. To retry, send the same delivery ID and the
