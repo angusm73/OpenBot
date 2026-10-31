@@ -66,6 +66,8 @@ export interface GitHubConnectorSource {
   mcpServer(): McpServerConfig | null;
   /** The bearer for `mcpServer()`: the secret of the loopback GitHub MCP server, or the user token. */
   mcpAuthorization(): Effect.Effect<string | null, McpGatewayFailed>;
+  /** The user token for the GitHub API, refreshed when it is close to its end. Null while disconnected. */
+  accessToken(): Effect.Effect<string | null, McpGatewayFailed>;
 }
 
 export interface McpGatewayOptions {

@@ -58,4 +58,9 @@ export const messages = defineMessages("status.agent", {
   "status.agent.planContinues": "The plan has open steps. The agent continues ({current} of {limit}).",
   "status.agent.waitWokeSignedIn": "The sign-in to {name} is done. The agent continues.",
   "status.agent.waitWokeSignInFailed": "The sign-in to {name} did not finish. The agent continues.",
+  "status.agent.waitWokePullRequest": "Pull request {name} has news. The agent continues.",
+  "status.agent.waitWokePullRequestMerged": "Pull request {name} was merged. The agent continues.",
+  "status.agent.waitWokePullRequestClosed": "Pull request {name} was closed. The agent continues.",
+  "status.agent.waitWokePullRequestUnreadable":
+    "OpenBot could not read pull request {name} and stopped watching it. The agent continues.",
 });

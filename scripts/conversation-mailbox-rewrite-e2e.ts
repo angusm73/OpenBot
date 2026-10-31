@@ -141,6 +141,7 @@ async function startRuntime() {
       ownsRoutine: () => true,
       hasRoutine: () => true,
       webhookRoutineName: () => null,
+      pullRequestsAvailable: () => false,
       requireKnownAgent: () => {},
       enqueueWake: () => Effect.die(new Error("Not used by this check.")),
       reportError: () => {},

@@ -10,9 +10,9 @@ separate "watch" object.
 | Source | Opened by | Wakes on | Ends on | Status |
 | --- | --- | --- | --- | --- |
 | `routine` | The agent, with `openbot.await_event` | A routine run of the agent, or a local script event that names the wait | The agent's `close_wait`, or the user's cancel | Shipped |
-| `mcp-sign-in` | The host, for a Sign in card from `save_mcp_server` or `test_mcp_server` | The end of a sign-in to the server's address: success, failure or cancel | A sign-in that connects | This change |
-| `webhook` | The agent, with `await_event` and `webhook: { routineId, eventType?, filters? }` | A webhook event of that routine that matches | `close_wait` or cancel | Shipped (stack layer 2) |
-| `github-pull-request` | The agent, with `await_event` and a pull request | Checks failed or passed, a new comment by someone else, a conflict | Merged or closed; 8 failed reads in a row | Stack layer 3 |
+| `mcp-sign-in` | The host, for a Sign in card from `save_mcp_server` or `test_mcp_server` | The end of a sign-in to the server's address: success, failure or cancel | A sign-in that connects | This stack, layer 1 |
+| `webhook` | The agent, with `await_event` and `webhook: { routineId, eventType?, filters? }` | A webhook event of that routine that matches | `close_wait` or cancel | This stack, layer 2 |
+| `github-pull-request` | The agent, with `await_event` and a pull request | Checks failed or passed, a new comment by someone else, a conflict | Merged or closed; 8 failed reads in a row | This stack, layer 3 |
 | T3 Code thread | — | — | — | Design only; see below |
 
 ## Which flows need a wait
@@ -134,18 +134,36 @@ The routine run carries the event and the woken waits, as a routine run does. An
 not match still runs the routine, without the wait. A run that a restart resumes has no event, so it
 wakes no webhook wait.
 
-### GitHub pull request (stack layer 3)
+### GitHub pull request
 
 GitHub does not push to OpenBot: the OpenBot GitHub App has webhooks off. The host sweeps instead,
-as T3 Code's pull request watch does (`PullRequestWatchReactor.ts`):
+as T3 Code's pull request watch does (`PullRequestWatchReactor.ts`), in
+`src/backend/agent-waits/pull-request-waits.ts`:
 
-- Every 2 minutes, one GraphQL read for each pull request that a wait watches, shared by its waits,
-  with the GitHub connector's user token. The agent never polls.
-- A fingerprint of state, mergeability, head commit and check counts, and of comment and review
-  counts; the full read runs only when it changes or something is in flight.
-- The cursor in `cursor_json` moves only after a complete read, so one event wakes the agent once.
-- Merged or closed is final. 8 failed reads in a row end the wait with a last wake that says why.
-  A rate limit pauses the sweep and is not a failure.
+- `await_event` with `pullRequest: { repository, number }` opens the wait. `target` is
+  `github:owner/repo#12`; it needs the GitHub connection (Server settings, Connectors), not a routine.
+- Every 2 minutes (`PULL_REQUEST_SWEEP_MS`), one GraphQL read for each pull request, shared by its
+  waits, with the connection's user token (`GitHubConnectorSource.accessToken`). The token goes in
+  the request header only. The agent never polls.
+- A fingerprint of state, mergeability, head commit, checks and remark ids skips a wait whose pull
+  request did not change. A wait whose last wake is still queued or running is read at a later sweep.
+- News: a newly failed check, all checks passed, a merge conflict, and a comment or review by an
+  account other than the token's, after the wait opened. New commits are not news by themselves
+  (they are often the agent's own push); they reset the checks. The token is the user's, so the
+  user's own comments do not wake the agent. The first read reports checks that had already failed
+  or passed, so an agent that waits for checks that are done wakes once. At most 10 items, with
+  200-character excerpts, framed as data from GitHub.
+- The cursor in `cursor_json` holds what the agent was last told; it moves only after a complete
+  read, so one piece of news wakes the agent once. A rerun that passes drops a failed check, so a
+  second failure is news again.
+- Merged or closed is final. 8 failed reads in a row (`failures`) end the wait with a last wake that
+  gives the error. A rate limit (429, `x-ratelimit-remaining: 0`, `retry-after`, or a `RATE_LIMITED`
+  GraphQL error) and no answer within 30 seconds pause the sweep and are not failures. With GitHub
+  disconnected, each read fails, so the wait ends after 8 sweeps. `AgentService.stop` interrupts a
+  sweep that runs.
+
+Not done: one batched query for many pull requests, and a cheap fingerprint query before the full
+read, as T3 Code does. One read costs about one GraphQL point, 30 an hour for each pull request.
 
 ### T3 Code thread (design only)
 

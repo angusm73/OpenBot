@@ -87,6 +87,7 @@ const waits = new AgentWaits({
     ownsRoutine: () => true,
     hasRoutine: () => true,
     webhookRoutineName: () => null,
+    pullRequestsAvailable: () => false,
     requireKnownAgent: (agentId) => {
       conversation.requireKnownAgent(agentId);
     },
